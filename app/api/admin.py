@@ -292,21 +292,29 @@ def _codex_accounts_section(
     homes_configured: tuple[str, ...],
     per_account: list[dict[str, Any]],
 ) -> str:
-    """Render a card per configured CODEX_HOME with usage + auth freshness.
+    """Render a card per Codex account in use, with usage stats + auth health.
 
-    Only shows when multi-account is on (more than one home configured)
-    OR when DB has actually recorded a non-empty codex_home — single-
-    account deployments stay visually quiet.
+    Always renders if there's at least one accessible auth.json — even in
+    single-account mode, so operators can see token expiry / refresh state
+    without first setting up multi-account.
     """
+    # Effective homes: CODEX_HOMES list when set; otherwise the container
+    # default $HOME/.codex (which our docker-compose mounts from the host).
+    effective_homes: list[str] = list(homes_configured)
+    if not effective_homes:
+        default = str(Path.home() / ".codex")
+        if Path(default, "auth.json").is_file():
+            effective_homes.append(default)
+
     has_data = any(row.get("codex_home") for row in per_account)
-    if len(homes_configured) <= 1 and not has_data:
+    if not effective_homes and not has_data:
         return ""
 
     by_path = {row["codex_home"]: row for row in per_account}
 
     cards = []
     seen: set[str] = set()
-    for home in homes_configured:
+    for home in effective_homes:
         seen.add(home)
         stats = by_path.get(home, {"total": 0, "succeeded": 0, "failed": 0, "last_seen": None})
         cards.append(_codex_account_card(home, stats, configured=True))
@@ -317,15 +325,43 @@ def _codex_accounts_section(
         if h and h not in seen:
             cards.append(_codex_account_card(h, row, configured=False))
 
+    multi = len(effective_homes) > 1
+    subtitle = (
+        "last 30 days · round-robin between accounts"
+        if multi
+        else "last 30 days · single-account mode"
+    )
+
     return f"""
       <section>
         <div class="section-title">
           <h2>Codex accounts</h2>
-          <span class="muted" style="font-size: 13px">last 30 days · round-robin</span>
+          <span class="muted" style="font-size: 13px">{subtitle}</span>
         </div>
         <div class="account-grid">{''.join(cards)}</div>
       </section>
     """
+
+
+def _decode_access_token_exp(access_token: str) -> datetime | None:
+    """Pull the `exp` claim out of the access_token JWT and return it as UTC
+    datetime. None on any parse error (corrupt token, padding mismatch, etc.)
+    so the card can fall back to last_refresh-based heuristics."""
+    if not access_token or "." not in access_token:
+        return None
+    try:
+        import base64 as _b64
+        import json as _json
+        payload_b64 = access_token.split(".")[1]
+        # JWT base64 segments often omit padding; restore it.
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = _json.loads(_b64.urlsafe_b64decode(payload_b64))
+        exp = payload.get("exp")
+        if not isinstance(exp, (int, float)):
+            return None
+        return datetime.fromtimestamp(int(exp), tz=timezone.utc)
+    except Exception:
+        return None
 
 
 def _codex_account_card(
@@ -334,39 +370,68 @@ def _codex_account_card(
     *,
     configured: bool,
 ) -> str:
-    """One CODEX_HOME → one card. Reads auth.json's last_refresh + account_id
-    if reachable, otherwise falls back to "auth.json unreadable"."""
+    """One CODEX_HOME → one card. Reads auth.json for last_refresh, account_id,
+    and the access_token's actual JWT `exp`. Health chip + expiry text are
+    driven by the real `exp` when we can parse it; falls back to
+    last_refresh + 10d heuristic for corrupt or unreadable tokens."""
     import json as _json
     label = _short_home_label(home_path) or home_path
     total = int(stats.get("total") or 0)
     succeeded = int(stats.get("succeeded") or 0)
     failed = int(stats.get("failed") or 0)
     last_seen = stats.get("last_seen")
-    success_pct = round(100 * succeeded / total) if total else None
 
     auth_status = "<span class='chip chip-mute'>auth.json not found</span>"
     last_refresh_str = ""
+    expires_str = "expires —"
     account_hint = ""
     try:
         auth_path = Path(home_path) / "auth.json"
         if auth_path.is_file():
             data = _json.loads(auth_path.read_text(encoding="utf-8"))
             last_refresh = data.get("last_refresh") or ""
-            account_id = (data.get("tokens") or {}).get("account_id") or ""
+            tokens = data.get("tokens") or {}
+            account_id = tokens.get("account_id") or ""
+            access_token = tokens.get("access_token") or ""
+
             if last_refresh:
                 last_refresh_str = _relative_time(last_refresh)
-                # access tokens last 10 days — warn when last_refresh is older
+
+            # Prefer the access_token's real JWT exp claim — it's the actual
+            # ground truth. Falls back to last_refresh + 10d guess if exp is
+            # unparseable for any reason.
+            exp_dt = _decode_access_token_exp(access_token)
+            now = datetime.now(timezone.utc)
+            if exp_dt is not None:
+                seconds_left = (exp_dt - now).total_seconds()
+                days_left = seconds_left / 86400
+                if seconds_left < 0:
+                    auth_status = "<span class='chip chip-fail'>expired</span>"
+                    expires_str = f"expired {_relative_time(exp_dt.isoformat())}"
+                elif days_left < 1:
+                    auth_status = "<span class='chip chip-fail'>expires soon</span>"
+                    expires_str = f"expires in {int(seconds_left // 3600)}h"
+                elif days_left < 3:
+                    auth_status = "<span class='chip chip-queue'>refresh soon</span>"
+                    expires_str = f"expires in {days_left:.1f}d"
+                else:
+                    auth_status = "<span class='chip chip-ok'>healthy</span>"
+                    expires_str = f"expires in {days_left:.1f}d"
+            elif last_refresh:
+                # Fallback: estimate from last_refresh + 10d window
                 try:
                     ts = datetime.fromisoformat(last_refresh.replace("Z", "+00:00"))
-                    age_days = (datetime.now(timezone.utc) - ts).days
+                    age_days = (now - ts).days
                     if age_days > 9:
                         auth_status = "<span class='chip chip-fail'>token may be expired</span>"
                     elif age_days > 6:
                         auth_status = "<span class='chip chip-queue'>refresh soon</span>"
                     else:
                         auth_status = "<span class='chip chip-ok'>healthy</span>"
+                    expires_str = f"~{max(0, 10 - age_days)}d remaining (estimated)"
                 except ValueError:
                     auth_status = "<span class='chip chip-mute'>refresh time unreadable</span>"
+
             if account_id:
                 account_hint = f"<code class='handle'>account {account_id[:8]}…</code>"
     except Exception:
@@ -392,6 +457,7 @@ def _codex_account_card(
         </div>
         <div class="account-footer">
           <span>Auth: {auth_status}</span>
+          <span>{html.escape(expires_str)}</span>
           <span>{'last_refresh ' + last_refresh_str if last_refresh_str else 'last_refresh —'}</span>
           <span>{'last_used ' + _relative_time(last_seen) if last_seen else 'last_used —'}</span>
         </div>
