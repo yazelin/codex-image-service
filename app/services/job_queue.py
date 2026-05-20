@@ -161,6 +161,7 @@ class ImageJobQueue:
                 duration_seconds=result.duration_seconds,
                 workdir=result.workdir,
                 codex_command=result.command,
+                codex_home=result.codex_home,
             )
             response = {
                 "id": job.request_id,

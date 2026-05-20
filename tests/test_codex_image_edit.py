@@ -38,7 +38,7 @@ def _make_png_bytes() -> bytes:
     return sig + ihdr + idat + iend
 
 
-def _settings_for(workdir: Path, generated: Path) -> Settings:
+def _settings_for(workdir: Path, generated: Path, homes: tuple[str, ...] = ()) -> Settings:
     return Settings(
         admin_username="admin",
         admin_password="x",
@@ -50,6 +50,7 @@ def _settings_for(workdir: Path, generated: Path) -> Settings:
         codex_timeout_seconds=5,
         codex_workdir=workdir,
         codex_worker_concurrency=1,
+        codex_homes=homes,
         generation_queue_max_size=1,
         request_wait_timeout_seconds=5,
         image_retention_days=7,
@@ -91,7 +92,7 @@ class EditModeRouting(unittest.TestCase):
 
             captured = {}
 
-            async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_path=None):
+            async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_path=None, codex_home=None):
                 captured["run_dir"] = run_dir
                 captured["reference_path"] = reference_path
                 captured["instruction_kwargs"] = dict(
@@ -169,7 +170,7 @@ class EditModeRouting(unittest.TestCase):
 
             captured = {}
 
-            async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_path=None):
+            async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_path=None, codex_home=None):
                 captured["instruction"] = gen._instruction(
                     prompt=prompt, size=size, quality=quality,
                     output_path=output_path, index=index, count=count,
@@ -216,6 +217,136 @@ class EditModeRouting(unittest.TestCase):
                 count=1,
                 reference_image_base64="!!!not_valid_base64!!!",
             )
+
+
+class RoundRobinHomes(unittest.TestCase):
+    """CODEX_HOMES round-robin + cross-account retry."""
+
+    def _setup(self, homes, fake_run_side_effect):
+        """Returns (captured, generator) ready for a generate() call.
+
+        fake_run_side_effect: list of return values / exceptions per call.
+        """
+        from app.services.codex_image import CodexGenerationError, CodexImageGenerator
+
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tmp_path = Path(tmp.name)
+        workdir = tmp_path / "runs"
+        generated = tmp_path / "generated"
+        workdir.mkdir()
+        generated.mkdir()
+        settings = _settings_for(workdir, generated, homes=homes)
+        gen = CodexImageGenerator(settings)
+        target = generated / "img_rr.png"
+        target.write_bytes(_make_png_bytes())
+
+        captured = {"homes_used": [], "instructions": []}
+        call_idx = [0]
+        png_bytes = _make_png_bytes()
+
+        async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_path=None, codex_home=None):
+            captured["homes_used"].append(codex_home)
+            captured["instructions"].append(
+                self_._instruction(
+                    prompt=prompt, size=size, quality=quality,
+                    output_path=output_path, index=index, count=count,
+                    reference_path=reference_path,
+                )
+            )
+            i = call_idx[0]
+            call_idx[0] += 1
+            side = fake_run_side_effect[i]
+            if isinstance(side, Exception):
+                raise side
+            # On success, write a fake PNG to output_path so the
+            # generate() loop's existence check passes.
+            output_path.write_bytes(png_bytes)
+            return side
+
+        return captured, gen, fake_run
+
+    def test_round_robin_advances_per_request(self):
+        from app.services.codex_image import CodexImageGenerator
+        captured, gen, fake_run = self._setup(
+            homes=("/h/a", "/h/b"),
+            fake_run_side_effect=[("cmd", "out", "err")] * 3,
+        )
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+            for _ in range(3):
+                asyncio.run(gen.generate(
+                    request_id=f"img_rr_{_}",
+                    prompt="x", size="1024x1024", quality="medium", count=1,
+                ))
+        # /h/a, /h/b, /h/a — round-robin
+        self.assertEqual(captured["homes_used"], ["/h/a", "/h/b", "/h/a"])
+
+    def test_empty_homes_passes_none(self):
+        from app.services.codex_image import CodexImageGenerator
+        captured, gen, fake_run = self._setup(
+            homes=(),
+            fake_run_side_effect=[("cmd", "out", "err")],
+        )
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+            asyncio.run(gen.generate(
+                request_id="img_none", prompt="x",
+                size="1024x1024", quality="medium", count=1,
+            ))
+        # No CODEX_HOMES configured → codex_home=None (container default)
+        self.assertEqual(captured["homes_used"], [None])
+
+    def test_first_home_fails_falls_back_to_second(self):
+        from app.services.codex_image import CodexImageGenerator, CodexGenerationError
+        captured, gen, fake_run = self._setup(
+            homes=("/h/a", "/h/b"),
+            fake_run_side_effect=[
+                CodexGenerationError("A timeout", stderr="A failed"),
+                ("cmd", "out-b", "err-b"),  # B succeeds
+            ],
+        )
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+            result = asyncio.run(gen.generate(
+                request_id="img_retry", prompt="x",
+                size="1024x1024", quality="medium", count=1,
+            ))
+        # First attempt /h/a failed, retried with /h/b
+        self.assertEqual(captured["homes_used"], ["/h/a", "/h/b"])
+        # Final result reports /h/b as the home that succeeded
+        self.assertEqual(result.codex_home, "/h/b")
+
+    def test_both_homes_fail_raises(self):
+        from app.services.codex_image import CodexImageGenerator, CodexGenerationError
+        captured, gen, fake_run = self._setup(
+            homes=("/h/a", "/h/b"),
+            fake_run_side_effect=[
+                CodexGenerationError("A timeout", stderr="A failed"),
+                CodexGenerationError("B 401", stderr="B failed"),
+            ],
+        )
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+            with self.assertRaises(CodexGenerationError):
+                asyncio.run(gen.generate(
+                    request_id="img_double_fail", prompt="x",
+                    size="1024x1024", quality="medium", count=1,
+                ))
+        self.assertEqual(captured["homes_used"], ["/h/a", "/h/b"])
+
+    def test_single_home_no_retry(self):
+        from app.services.codex_image import CodexImageGenerator, CodexGenerationError
+        captured, gen, fake_run = self._setup(
+            homes=("/h/only",),
+            fake_run_side_effect=[
+                CodexGenerationError("only one fails", stderr="alone"),
+            ],
+        )
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+            with self.assertRaises(CodexGenerationError):
+                asyncio.run(gen.generate(
+                    request_id="img_single", prompt="x",
+                    size="1024x1024", quality="medium", count=1,
+                ))
+        # Only one attempt — no retry when only one home configured
+        self.assertEqual(captured["homes_used"], ["/h/only"])
 
 
 if __name__ == "__main__":

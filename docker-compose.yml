@@ -1,3 +1,21 @@
+# Production compose — service sits behind the existing Docker nginx on the
+# pre-created `nginx_bridge_network`. For nginx-less local testing use
+# `docker-compose.local.yml` instead.
+#
+# Multi-account note:
+#   The service rotates `CODEX_HOME` through every entry in $CODEX_HOMES on a
+#   round-robin basis, so each request consumes quota from a different
+#   ChatGPT subscription. Each account must have its own dir on the host
+#   under ~/codex-homes/<label>/, populated by:
+#     mkdir -p ~/codex-homes/<label>
+#     CODEX_HOME=~/codex-homes/<label> codex login
+#   Then set in .env (colon-separated paths as seen *inside the container*):
+#     CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
+#
+# Single-account fallback: leave CODEX_HOMES empty and the service uses the
+# container's default $HOME/.codex (mounted below as a thin compatibility
+# shim from ${HOME}/.codex if present).
+
 services:
   codex-image-service:
     build: .
@@ -12,12 +30,23 @@ services:
       GENERATED_DIR: /app/static/generated
       CODEX_WORKDIR: /app/data/codex-runs
       DATABASE_URL: sqlite:////app/data/app.db
+      # Paths the *container* uses; the host parent dir is mounted below.
+      # Leave empty for single-account ($HOME/.codex) — the existing default.
+      # Set in .env when you're ready for multi-account, e.g.
+      #   CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
+      CODEX_HOMES: ${CODEX_HOMES:-}
     volumes:
       - ./data:/app/data
       - ./static/generated:/app/static/generated
-      - ./data/codex-home:/root/.codex
-      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
-      - ${HOME}/.codex/config.toml:/root/.codex/config.toml:ro
+      # Multi-account parent dir. Create labelled subdirs under ~/codex-homes/
+      # via `CODEX_HOME=~/codex-homes/<label> codex login`. The whole tree is
+      # mounted read-only — refresh of access tokens happens host-side when
+      # you (or a cron) periodically use codex from each home.
+      - ${HOME}/codex-homes:/host_codex_homes:ro
+      # Single-account compatibility: if you skip the multi-account setup
+      # and only have one account at ~/.codex, point CODEX_HOMES at this
+      # path instead (CODEX_HOMES=/root/.codex).
+      - ${HOME}/.codex:/root/.codex:ro
     networks:
       - nginx_bridge_network
 

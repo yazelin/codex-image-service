@@ -31,9 +31,16 @@ services:
       GENERATED_DIR: /app/static/generated
       CODEX_WORKDIR: /app/data/codex-runs
       DATABASE_URL: sqlite:////app/data/app.db
+    environment:
+      # Multi-account round-robin (optional). Leave the default for a
+      # single-account local test; see README for multi-account setup.
+      CODEX_HOMES: ${CODEX_HOMES:-}
     volumes:
       - ./data:/app/data
       - ./static/generated:/app/static/generated
-      - ./data/codex-home:/root/.codex
-      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
-      - ${HOME}/.codex/config.toml:/root/.codex/config.toml:ro
+      # Single-account default: bind the host's main ~/.codex.
+      - ${HOME}/.codex:/root/.codex:ro
+      # Multi-account parent dir (optional). Only used when CODEX_HOMES
+      # points at paths under /host_codex_homes/. Create labelled subdirs
+      # via `CODEX_HOME=~/codex-homes/<label> codex login`.
+      - ${HOME}/codex-homes:/host_codex_homes:ro

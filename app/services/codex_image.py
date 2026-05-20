@@ -88,11 +88,42 @@ class CodexGenerationResult:
     duration_seconds: float
     workdir: Path
     command: str
+    # The CODEX_HOME used for the final successful attempt. None when no
+    # multi-home rotation was configured (fall back to container default).
+    codex_home: str | None = None
 
 
 class CodexImageGenerator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        # Round-robin counter across configured CODEX_HOME accounts.
+        # Empty tuple = use container default ($HOME/.codex), no rotation.
+        self._home_cursor = 0
+        self._home_lock = asyncio.Lock()
+
+    async def _claim_primary_base(self) -> int:
+        """Reserve the next round-robin slot for one request.
+
+        Returns the index this request's PRIMARY attempt should use; the
+        cursor is bumped exactly once per request, regardless of how many
+        retry attempts follow. Empty homes → returns 0 (caller ignores it).
+        """
+        homes = self.settings.codex_homes
+        if not homes:
+            return 0
+        async with self._home_lock:
+            base = self._home_cursor
+            self._home_cursor = (self._home_cursor + 1) % len(homes)
+        return base
+
+    def _home_for_attempt(self, base: int, attempt_index: int) -> str | None:
+        """Look up the CODEX_HOME path for attempt N of a request whose
+        primary slot was `base`. attempt_index=0 = primary; 1+ = retry
+        on the next account in the rotation (when more than one is set)."""
+        homes = self.settings.codex_homes
+        if not homes:
+            return None
+        return homes[(base + attempt_index) % len(homes)]
 
     async def generate(
         self,
@@ -134,12 +165,13 @@ class CodexImageGenerator:
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         command_display = ""
+        codex_home_used: str | None = None
         started = time.monotonic()
 
         try:
             for index in range(count):
                 output_path = storage.generated_image_path(self.settings, request_id, index, count)
-                command, stdout, stderr = await self._run_codex_once(
+                command, stdout, stderr, picked_home = await self._run_codex_with_retry(
                     run_dir=run_dir,
                     output_path=output_path,
                     prompt=prompt,
@@ -150,6 +182,7 @@ class CodexImageGenerator:
                     reference_path=reference_path,
                 )
                 command_display = command
+                codex_home_used = picked_home
                 stdout_parts.append(stdout)
                 stderr_parts.append(stderr)
                 if not output_path.exists():
@@ -188,7 +221,76 @@ class CodexImageGenerator:
             duration_seconds=time.monotonic() - started,
             workdir=run_dir,
             command=command_display,
+            codex_home=codex_home_used,
         )
+
+    async def _run_codex_with_retry(
+        self,
+        *,
+        run_dir: Path,
+        output_path: Path,
+        prompt: str,
+        size: str,
+        quality: str,
+        index: int,
+        count: int,
+        reference_path: Path | None = None,
+    ) -> tuple[str, str, str, str | None]:
+        """Wrap _run_codex_once with cross-account retry.
+
+        Picks the next CODEX_HOME via round-robin for the primary attempt.
+        If it fails (CodexGenerationError) AND there's at least one other
+        configured home, retry once on the next account. Returns the
+        final (command_display, stdout, stderr, codex_home_used) tuple.
+        """
+        homes = self.settings.codex_homes
+        max_attempts = 1 if len(homes) <= 1 else 2
+        # Reserve a primary slot once; retries step from there without
+        # double-advancing the global cursor.
+        primary_base = await self._claim_primary_base()
+        last_error: CodexGenerationError | None = None
+        for attempt in range(max_attempts):
+            picked_home = self._home_for_attempt(primary_base, attempt)
+            try:
+                command, stdout, stderr = await self._run_codex_once(
+                    run_dir=run_dir,
+                    output_path=output_path,
+                    prompt=prompt,
+                    size=size,
+                    quality=quality,
+                    index=index,
+                    count=count,
+                    reference_path=reference_path,
+                    codex_home=picked_home,
+                )
+                return command, stdout, stderr, picked_home
+            except CodexGenerationError as exc:
+                last_error = exc
+                if attempt + 1 >= max_attempts:
+                    raise
+                # Don't bail — try the next home. Surface the prior failure
+                # as a stderr breadcrumb so the DB row tells the story.
+                logger_prefix = (
+                    f"[cross-account retry] CODEX_HOME={picked_home or 'default'}"
+                    f" failed: {exc}\n"
+                )
+                # Mutate the existing exception's bookkeeping so the next
+                # round_once writes into a clean slate (workdir is shared
+                # across attempts; that's intentional, the reference image
+                # stays put).
+                exc.stderr = logger_prefix + (exc.stderr or "")
+                # Pre-pend that breadcrumb into the retry's stderr aggregate
+                # via mutation of self (cheap shim): stash on the run_dir.
+                _crumb_path = run_dir / "_retry_crumbs.log"
+                try:
+                    with _crumb_path.open("a", encoding="utf-8") as fh:
+                        fh.write(logger_prefix)
+                except OSError:
+                    pass
+                continue
+        # unreachable, but keep mypy happy
+        assert last_error is not None
+        raise last_error
 
     async def _run_codex_once(
         self,
@@ -201,6 +303,7 @@ class CodexImageGenerator:
         index: int,
         count: int,
         reference_path: Path | None = None,
+        codex_home: str | None = None,
     ) -> tuple[str, str, str]:
         instruction = self._instruction(
             prompt=prompt,
@@ -234,11 +337,15 @@ class CodexImageGenerator:
         # `process.kill()` only stops the codex binary and orphaned children
         # (e.g. PIL hand-drawing scripts) keep stdout/stderr open, blocking
         # process.communicate() forever and wedging the worker.
+        env = os.environ.copy()
+        if codex_home:
+            env["CODEX_HOME"] = codex_home
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            env=env,
         )
 
         try:

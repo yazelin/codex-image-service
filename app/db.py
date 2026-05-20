@@ -73,6 +73,13 @@ def init_db(settings: Settings | None = None) -> None:
                 ON image_requests(status);
             """
         )
+        # codex_home tracks which CODEX_HOME account ran the request
+        # (multi-account round-robin). Older DBs may not have this column.
+        existing_cols = {
+            row[1] for row in connection.execute("PRAGMA table_info(image_requests)").fetchall()
+        }
+        if "codex_home" not in existing_cols:
+            connection.execute("ALTER TABLE image_requests ADD COLUMN codex_home TEXT")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -185,6 +192,7 @@ def mark_image_request_succeeded(
     duration_seconds: float,
     workdir: Path,
     codex_command: str,
+    codex_home: str | None = None,
 ) -> None:
     with connect(settings) as connection:
         connection.execute(
@@ -197,7 +205,8 @@ def mark_image_request_succeeded(
                 duration_seconds = ?,
                 finished_at = ?,
                 workdir = ?,
-                codex_command = ?
+                codex_command = ?,
+                codex_home = ?
             WHERE id = ?
             """,
             (
@@ -208,6 +217,7 @@ def mark_image_request_succeeded(
                 iso_now(),
                 str(workdir),
                 codex_command,
+                codex_home,
                 request_id,
             ),
         )

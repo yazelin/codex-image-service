@@ -38,6 +38,7 @@ class Settings:
     codex_timeout_seconds: int
     codex_workdir: Path
     codex_worker_concurrency: int
+    codex_homes: tuple[str, ...]  # CODEX_HOME paths in round-robin order; () = container default
     generation_queue_max_size: int
     request_wait_timeout_seconds: int
     image_retention_days: int
@@ -54,9 +55,14 @@ class Settings:
             database_url=os.getenv("DATABASE_URL", "sqlite:///./data/app.db"),
             generated_dir=Path(os.getenv("GENERATED_DIR", "static/generated")),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/"),
-            codex_timeout_seconds=_int_env("CODEX_TIMEOUT_SECONDS", 180),
+            codex_timeout_seconds=_int_env("CODEX_TIMEOUT_SECONDS", 360),
             codex_workdir=Path(os.getenv("CODEX_WORKDIR", "./data/codex-runs")),
             codex_worker_concurrency=_int_env("CODEX_WORKER_CONCURRENCY", 2),
+            codex_homes=tuple(
+                p.strip()
+                for p in (os.getenv("CODEX_HOMES") or "").split(":")
+                if p.strip()
+            ),
             generation_queue_max_size=_int_env("GENERATION_QUEUE_MAX_SIZE", 50),
             request_wait_timeout_seconds=_int_env("REQUEST_WAIT_TIMEOUT_SECONDS", 600),
             image_retention_days=_int_env("IMAGE_RETENTION_DAYS", 7),
