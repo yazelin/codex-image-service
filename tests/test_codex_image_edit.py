@@ -506,5 +506,76 @@ class CodexArgvBuilder(unittest.TestCase):
             self.assertTrue(argv[-1].startswith("Call the built-in image_gen"))
 
 
+class JobQueueWiring(unittest.TestCase):
+    """End-to-end: ImageGenerateRequest → _run_job → generate() carries the list."""
+
+    def test_run_job_forwards_resolved_reference_images(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        from app import db
+        from app.services.job_queue import ImageJobQueue, ImageJob
+        from app.services.codex_image import CodexGenerationResult
+        from app.models import ImageGenerateRequest
+
+        async def scenario():
+            with TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                workdir = tmp_path / "runs"
+                generated = tmp_path / "generated"
+                workdir.mkdir()
+                generated.mkdir()
+                settings = _settings_for(workdir, generated)
+                db.init_db(settings)
+                api_key, _ = db.create_api_key(settings, "wiring-test")
+                payload = ImageGenerateRequest(
+                    prompt="combine these two",
+                    reference_images_base64=["AAAA", "BBBB"],
+                )
+                db.insert_image_request(
+                    settings,
+                    request_id="job_wiring",
+                    api_key_id=api_key["id"],
+                    prompt=payload.prompt,
+                    size=payload.size,
+                    quality=payload.quality,
+                    count=payload.count,
+                    expires_at=(db.utc_now() + timedelta(days=1)).isoformat(),
+                )
+                queue = ImageJobQueue(settings)
+                loop = asyncio.get_running_loop()
+                job = ImageJob(
+                    request_id="job_wiring",
+                    api_key_id=api_key["id"],
+                    payload=payload,
+                    expires_at=(db.utc_now() + timedelta(days=1)).isoformat(),
+                    future=loop.create_future(),
+                )
+
+                captured = {}
+
+                async def fake_generate(**kwargs):
+                    captured.update(kwargs)
+                    fake_image = generated / "job_wiring_0.png"
+                    fake_image.write_bytes(_make_png_bytes())
+                    return CodexGenerationResult(
+                        image_paths=[fake_image],
+                        stdout="",
+                        stderr="",
+                        duration_seconds=0.1,
+                        workdir=workdir / "job_wiring",
+                        command="fake",
+                    )
+
+                with patch.object(queue.generator, "generate", new=fake_generate):
+                    await queue._run_job(job)
+                return captured
+
+        captured = asyncio.run(scenario())
+        self.assertEqual(
+            captured.get("reference_images_base64"),
+            ["AAAA", "BBBB"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
