@@ -14,10 +14,24 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN uv pip install --system -r requirements.txt
 
+# Create a non-root user matching the typical host UID so bind-mounted
+# files (in particular ~/codex-homes/*/) stay owned by the host operator
+# and remain readable from host-side scripts (token-refresh cron etc).
+# Compose can override this by setting `user:` to a different UID/GID.
+ARG APP_UID=1000
+ARG APP_GID=1000
+RUN groupadd -g ${APP_GID} app \
+    && useradd -m -u ${APP_UID} -g ${APP_GID} -d /home/app -s /bin/bash app
+
 COPY app ./app
 COPY static ./static
 
-RUN mkdir -p /app/data /app/static/generated /root/.codex
+# Pre-create the runtime dirs the service writes to, and the default
+# CODEX_HOME path (mounted from the host as the single-account fallback).
+RUN mkdir -p /app/data /app/static/generated /root/.codex \
+    && chown -R ${APP_UID}:${APP_GID} /app
+
+USER app:app
 
 EXPOSE 8000
 

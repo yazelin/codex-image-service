@@ -18,9 +18,17 @@
 
 services:
   codex-image-service:
-    build: .
+    build:
+      context: .
+      args:
+        # Match the host operator's UID/GID so files written into bind
+        # mounts (especially ~/codex-homes/*/ during codex login or token
+        # refresh) stay readable by the host user.
+        APP_UID: ${UID:-1000}
+        APP_GID: ${GID:-1000}
     container_name: codex-image-service
     restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
     env_file:
       - path: .env
         required: false
@@ -46,9 +54,9 @@ services:
       # build; the two file overlays keep auth.json / config.toml read-only
       # so the host's interactive codex stays the source of truth for
       # tokens. Override CODEX_HOMES in .env to point elsewhere.
-      - ./data/codex-home:/root/.codex
-      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
-      - ${HOME}/.codex/config.toml:/root/.codex/config.toml:ro
+      - ./data/codex-home:/home/app/.codex
+      - ${HOME}/.codex/auth.json:/home/app/.codex/auth.json:ro
+      - ${HOME}/.codex/config.toml:/home/app/.codex/config.toml:ro
       # Multi-account parent dir. Each subdir under ~/codex-homes/ is a
       # service-dedicated CODEX_HOME (created via
       # `CODEX_HOME=~/codex-homes/<label> codex login`). Mounted RW because
