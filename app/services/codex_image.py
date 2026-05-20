@@ -323,8 +323,6 @@ class CodexImageGenerator:
         reference_paths: list[Path],
         codex_home: str | None = None,
     ) -> tuple[str, str, str]:
-        # Shim: Task 3 will wire all paths; for now use the first reference only.
-        reference_path = reference_paths[0] if reference_paths else None
         instruction = self._instruction(
             prompt=prompt,
             size=size,
@@ -332,7 +330,7 @@ class CodexImageGenerator:
             output_path=output_path,
             index=index,
             count=count,
-            reference_path=reference_path,
+            reference_paths=reference_paths,
         )
         command = [
             "codex",
@@ -342,14 +340,14 @@ class CodexImageGenerator:
             "-C",
             str(run_dir),
         ]
-        # Edit mode: attach the reference as a real user-message image so the
-        # built-in image_gen tool can pass its bytes to gpt-image-2 edit.
-        # Putting the path in prompt text alone is not enough — the model sees
-        # "path" as text and never hands the image to the tool.
-        # `--image` is variadic in clap, so we need `--` before the positional
-        # prompt or it gets eaten as another image filename.
-        if reference_path is not None:
-            command.extend(["--image", str(reference_path.resolve()), "--"])
+        # Edit mode: attach each reference as its own --image so codex CLI
+        # passes every one to the built-in image_gen tool. --image is
+        # variadic in clap; the `--` separator before the positional
+        # prompt stops the prompt being eaten as another image filename.
+        if reference_paths:
+            for ref in reference_paths:
+                command.extend(["--image", str(ref.resolve())])
+            command.append("--")
         command.append(instruction)
         command_display = " ".join(command[:-1]) + " <imagegen prompt>"
         # start_new_session=True puts codex in its own process group so we can
@@ -377,9 +375,7 @@ class CodexImageGenerator:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
-                # codex already exited or we have no rights — fall through
                 pass
-            # Bound the post-kill drain so a slow OS cleanup can't hang us.
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     process.communicate(), timeout=5
@@ -415,20 +411,11 @@ class CodexImageGenerator:
         output_path: Path,
         index: int,
         count: int,
-        reference_path: Path | None = None,
-        reference_paths: list[Path] | None = None,
+        reference_paths: list[Path],
     ) -> str:
-        # Plural wins; singular is the Task-2 shim until Task 3 rewires fully.
-        if reference_paths is not None:
-            reference_path = reference_paths[0] if reference_paths else None
         image_label = f"image {index + 1} of {count}" if count > 1 else "the image"
-        if reference_path is not None:
-            # Format follows the canonical edit-prompt scaffolding documented
-            # in $CODEX_HOME/skills/.system/imagegen/references/sample-prompts.md
-            # ("Use case / Input images / Primary request / Constraints"). The
-            # built-in image_gen tool keys off this shape; deviating from it
-            # makes gpt-5.5 hand-roll PIL/Python code instead of calling the
-            # tool, which silently times out for non-trivial images.
+        if reference_paths:
+            ref = reference_paths[0]
             return (
                 "Call the built-in image_gen tool to edit the input image. "
                 "Do NOT write Python, shell, or any code to transform the "
@@ -436,7 +423,7 @@ class CodexImageGenerator:
                 "image_gen with the user's edit request.\n"
                 "$imagegen\n"
                 "Use case: image-edit\n"
-                f"Input images: Image 1: {reference_path.resolve()}\n"
+                f"Input images: Image 1: {ref.resolve()}\n"
                 f"Primary request: {prompt}\n"
                 "Constraints: preserve the subject identity, framing, and "
                 "geometry of Image 1 except where the request asks otherwise.\n"
