@@ -303,7 +303,7 @@ def _keys_page(settings: Any, prefix: str, new_api_key: str | None = None) -> st
     body = f"""
       <div class="page-head">
         <h2>API Keys</h2>
-        <p class="page-sub">Issue bearer keys for each caller. Tokens are hashed; the raw value is shown once.</p>
+        <p class="page-sub">Issue bearer keys for each caller. The raw <code>cimg_&lt;random-token&gt;</code> value is only shown once at creation; the server stores a sha256 hash.</p>
       </div>
       {notice}
       <section>
@@ -314,7 +314,14 @@ def _keys_page(settings: Any, prefix: str, new_api_key: str | None = None) -> st
         </form>
       </section>
       <section>
-        <h2>All keys</h2>
+        <div class="section-title">
+          <h2>All keys</h2>
+        </div>
+        <p class="muted" style="margin: -4px 0 14px; font-size: 13px;">
+          <strong>Heads up:</strong> the <em>Handle</em> column below is the admin reference
+          ID (<code>key_&lt;last-12-chars&gt;</code>), <strong>not</strong> the bearer key.
+          Callers must use the original <code>cimg_&lt;random-token&gt;</code> from creation time.
+        </p>
         {_api_keys_table(keys, prefix)}
       </section>
     """
@@ -503,10 +510,8 @@ def _api_keys_table(keys: list[dict[str, Any]], prefix: str) -> str:
         key_id_esc = html.escape(key['id'])
         rows.append(
             "<tr>"
-            f"<td><span class='id-cell'><code>{key_id_esc}</code>"
-            f"<button class='copy-btn copy-btn-mini' type='button' data-copy-value='{key_id_esc}' title='Copy key ID'>⧉</button>"
-            "</span></td>"
-            f"<td>{html.escape(key['name'])}</td>"
+            f"<td><code class='handle'>{key_id_esc}</code></td>"
+            f"<td><strong class='key-name'>{html.escape(key['name'])}</strong></td>"
             f"<td>{enabled}</td>"
             f"<td>{html.escape(str(key['requests_count']))}</td>"
             f"<td>{_relative_time(key['last_used_at']) or '—'}</td>"
@@ -519,7 +524,9 @@ def _api_keys_table(keys: list[dict[str, Any]], prefix: str) -> str:
             "No API keys yet. Use the form above to create your first one.</td></tr>"
         )
     return (
-        "<table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Requests</th>"
+        "<table><thead><tr>"
+        "<th title='Admin reference ID — not the bearer key. The bearer key (cimg_*) was only shown once at creation.'>Handle</th>"
+        "<th>Name</th><th>Status</th><th>Requests</th>"
         "<th>Last used</th><th>Action</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
@@ -1029,14 +1036,14 @@ _STYLES = """
     background: #d1fae5; color: #047857;
     border-color: #86efac;
   }
-  .copy-btn-mini {
-    padding: 2px 8px;
-    border-radius: 6px;
-    font-size: 13px; font-weight: 500;
-    margin-left: 6px;
-    vertical-align: middle;
+  /* Handle column: visibly subordinate so it doesn't read as "the API key" */
+  code.handle {
+    background: transparent;
+    color: var(--muted);
+    padding: 0;
+    font-size: 11.5px;
   }
-  .id-cell { display: inline-flex; align-items: center; }
+  .key-name { color: var(--ink); font-weight: 600; font-size: 14px; }
   .error {
     margin: 0 0 18px;
     padding: 14px 18px;
