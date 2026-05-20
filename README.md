@@ -153,6 +153,55 @@ HTTP request stays open until the image is ready or
 controlled by `CODEX_WORKER_CONCURRENCY` (default 2). Queue depth is
 capped at `GENERATION_QUEUE_MAX_SIZE` (default 50).
 
+## Multi-account round-robin (optional)
+
+A single ChatGPT subscription's per-account image-gen quota is the real
+cap on throughput. Configure two or more ChatGPT accounts and the service
+rotates `CODEX_HOME` between them per request, with automatic cross-account
+retry if any one account errors out.
+
+Each account needs its own host-side directory under `~/codex-homes/`:
+
+```bash
+mkdir -p ~/codex-homes/{personal,team}
+CODEX_HOME=~/codex-homes/personal codex login   # log in with ChatGPT A
+CODEX_HOME=~/codex-homes/team     codex login   # log in with ChatGPT B
+```
+
+The folder names are just labels — `personal` / `team` / `team-acme` /
+`backup-account`, whatever helps you remember which is which. Two
+`codex login`s on the *same* ChatGPT user account would point at the same
+quota pool though, so you only get extra capacity by using genuinely
+distinct user accounts.
+
+Then add to `.env` (paths as visible inside the container):
+
+```dotenv
+CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
+```
+
+`docker-compose.yml` already mounts `~/codex-homes:/host_codex_homes:ro`,
+so any subdirectory you create under `~/codex-homes/` becomes available
+at `/host_codex_homes/<name>` inside the container. Restart with
+`docker compose up -d --build` and the rotation kicks in.
+
+The admin Overview shows one card per account with a 30-day request
+count, success/failure split, auth-token freshness (green ≤6d, amber
+7–9d, red ≥10d since `last_refresh`), and the first 8 chars of the
+ChatGPT `account_id` so you can tell which is which. The History page
+gains an Account column with the chosen home (tooltip shows the full
+path).
+
+**Token refresh maintenance:** access tokens expire after ~10 days; the
+auth.json files are mounted read-only, so the container can't refresh
+them. Use codex periodically from the host with each home (or set up
+a small cron) to keep them fresh:
+
+```bash
+# weekly cron — touches each home to trigger a refresh
+for h in ~/codex-homes/*/; do CODEX_HOME="$h" codex --version >/dev/null; done
+```
+
 ## Cleanup
 
 Each `image_requests` row expires at `created_at + IMAGE_RETENTION_DAYS`.

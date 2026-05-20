@@ -329,7 +329,41 @@ images = r.json()[<span class="str">"images"</span>]   <span class="comment"># [
   </section>
 
   <section class="card">
-    <h2><span class="num">5</span>後台有什麼</h2>
+    <h2><span class="num">5</span>多帳號 Round-robin</h2>
+    <p>
+      單一 ChatGPT 訂閱的 per-account 產圖配額才是真正的 throughput 上限。
+      設兩個以上的 ChatGPT 帳號，服務就會逐請求輪流切 <code class="inline">CODEX_HOME</code>；
+      其中一個失敗時自動 retry 下一個帳號。
+    </p>
+<pre><span class="comment"># host 端 ~/codex-homes/&lt;label&gt;/ 各放一個</span>
+<span class="accent">mkdir</span> -p ~/codex-homes/{personal,team}
+<span class="accent">CODEX_HOME</span>=~/codex-homes/personal <span class="accent">codex</span> login   <span class="comment"># 登第一個帳號</span>
+<span class="accent">CODEX_HOME</span>=~/codex-homes/team     <span class="accent">codex</span> login   <span class="comment"># 登第二個帳號</span>
+
+<span class="comment"># .env（路徑是 container 內的觀點）</span>
+CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
+
+<span class="comment"># 重啟 — ~/codex-homes 父目錄已經被掛進 /host_codex_homes</span>
+<span class="accent">docker compose</span> up -d --build</pre>
+    <p>
+      子資料夾名稱隨你（<code class="inline">personal</code> /
+      <code class="inline">team-acme</code> / <code class="inline">dev</code> …）。
+      同一個 ChatGPT 用戶登兩次只會指到同一個 quota 池，**只有用不同 user 帳號**
+      才會真的多開配額池。
+    </p>
+    <p>
+      後台 Overview 會每個帳號出一張卡：近 30 天 request 數、成功 / 失敗、
+      auth token 健康度（綠 ≤6 天、黃 7–9 天、紅 ≥10 天 — access token 剛好
+      10 天到期），加上 ChatGPT <code class="inline">account_id</code> 前 8 碼
+      讓你辨認。access token 過期前要把 host 端 token 弄新，
+      auth.json 是 read-only 掛載，container 不會自己刷新：
+    </p>
+<pre><span class="comment"># 每週 cron：touch 每個 home 觸發 codex token refresh</span>
+<span class="accent">for</span> h in ~/codex-homes/*/; <span class="accent">do</span> CODEX_HOME=<span class="str">"$h"</span> codex --version &gt;/dev/null; <span class="accent">done</span></pre>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">6</span>後台有什麼</h2>
     <div class="features">
       <div class="feature">
         <h3><span class="ico a1">⌘</span>發 key / 停 key / 刪 key</h3>

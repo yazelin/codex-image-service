@@ -339,7 +339,44 @@ images = r.json()[<span class="str">"images"</span>]   <span class="comment"># [
   </section>
 
   <section class="card">
-    <h2><span class="num">5</span>What's in the admin</h2>
+    <h2><span class="num">5</span>Multi-account round-robin</h2>
+    <p>
+      A single ChatGPT subscription's per-account image-gen quota is the real
+      cap on throughput. Configure two or more ChatGPT accounts and the service
+      rotates <code class="inline">CODEX_HOME</code> between them per request,
+      with automatic cross-account retry if one account errors.
+    </p>
+<pre><span class="comment"># one host dir per account under ~/codex-homes/&lt;label&gt;/</span>
+<span class="accent">mkdir</span> -p ~/codex-homes/{personal,team}
+<span class="accent">CODEX_HOME</span>=~/codex-homes/personal <span class="accent">codex</span> login   <span class="comment"># log in with ChatGPT A</span>
+<span class="accent">CODEX_HOME</span>=~/codex-homes/team     <span class="accent">codex</span> login   <span class="comment"># log in with ChatGPT B</span>
+
+<span class="comment"># .env (paths are *inside the container*)</span>
+CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
+
+<span class="comment"># restart — the parent ~/codex-homes is already mounted into /host_codex_homes</span>
+<span class="accent">docker compose</span> up -d --build</pre>
+    <p>
+      Label the folders anything you want
+      (<code class="inline">personal</code> / <code class="inline">team-acme</code> /
+      <code class="inline">dev</code> / …). Two logins on the <em>same</em>
+      ChatGPT user account share one quota pool, so only distinct user
+      accounts actually expand capacity.
+    </p>
+    <p>
+      Admin Overview gets one card per account with the 30-day request count,
+      success/failure split, auth-token freshness chip (green ≤6d, amber 7–9d,
+      red ≥10d since <code class="inline">last_refresh</code>), and the first
+      8 chars of the ChatGPT <code class="inline">account_id</code>. Access
+      tokens last ~10 days and the auth.json files are mounted read-only,
+      so keep them fresh on the host side:
+    </p>
+<pre><span class="comment"># weekly cron — touch each home so codex refreshes its tokens</span>
+<span class="accent">for</span> h in ~/codex-homes/*/; <span class="accent">do</span> CODEX_HOME=<span class="str">"$h"</span> codex --version &gt;/dev/null; <span class="accent">done</span></pre>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">6</span>What's in the admin</h2>
     <div class="features">
       <div class="feature">
         <h3><span class="ico a1">⌘</span>Issue / disable / delete keys</h3>
