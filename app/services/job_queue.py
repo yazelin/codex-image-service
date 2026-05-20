@@ -150,6 +150,7 @@ class ImageJobQueue:
                 size=job.payload.size,
                 quality=job.payload.quality,
                 count=job.payload.count,
+                reference_image_base64=job.payload.reference_image_base64,
             )
             db.mark_image_request_succeeded(
                 self.settings,
