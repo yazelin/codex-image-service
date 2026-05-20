@@ -31,15 +31,6 @@ class MultiImageRequestModel(unittest.TestCase):
         req = ImageGenerateRequest(prompt="x")
         self.assertEqual(req.resolved_reference_images, [])
 
-    def test_plural_max_4_images(self):
-        from pydantic import ValidationError
-
-        with self.assertRaises(ValidationError):
-            ImageGenerateRequest(
-                prompt="x",
-                reference_images_base64=["a", "b", "c", "d", "e"],
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

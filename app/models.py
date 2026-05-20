@@ -11,12 +11,12 @@ class ImageGenerateRequest(BaseModel):
     # Deprecated: kept so existing callers (ctos-lite, catime) keep working.
     # Resolved through resolved_reference_images alongside the plural field.
     reference_image_base64: str | None = Field(default=None, max_length=20_000_000)
-    # Up to 4 source images; passed straight to codex CLI as repeated --image
-    # flags so gpt-image-2 edit can compose / outfit-swap / scene-merge.
-    reference_images_base64: list[str] | None = Field(
-        default=None,
-        max_length=4,
-    )
+    reference_images_base64: list[str] | None = Field(default=None)
+    # Note: no client-side count cap. OpenAI's gpt-image edit API
+    # accepts ~16 images and will reject anything beyond that with a
+    # clear error which we surface verbatim. The 4-cap from PR #1 was
+    # arbitrary; lifting it for consistency across ctos-lite and
+    # ching-tech-os, which deliberately set no cap either.
 
     @property
     def resolved_reference_images(self) -> list[str]:
