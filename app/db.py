@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -312,6 +312,32 @@ def list_expired_image_requests(
             (before_iso, limit),
         ).fetchall()
     return [_decode_request_row(row) for row in rows]
+
+
+def per_account_stats(settings: Settings, days: int = 30) -> list[dict[str, Any]]:
+    """Return per-CODEX_HOME counts over the last `days` (default 30).
+
+    Rows: {codex_home, total, succeeded, failed, last_seen}.
+    Sorted by total desc so the most-used account leads in the UI.
+    """
+    cutoff_iso = (utc_now() - timedelta(days=days)).isoformat()
+    with connect(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                COALESCE(codex_home, '') AS codex_home,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END) AS failed,
+                MAX(created_at) AS last_seen
+            FROM image_requests
+            WHERE created_at >= ?
+            GROUP BY codex_home
+            ORDER BY total DESC
+            """,
+            (cutoff_iso,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def dashboard_stats(settings: Settings) -> dict[str, int]:

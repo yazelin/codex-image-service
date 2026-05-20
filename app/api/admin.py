@@ -263,6 +263,8 @@ async def cleanup(request: Request):
 def _overview_page(settings: Any, prefix: str) -> str:
     stats = db.dashboard_stats(settings)
     recent = db.list_image_requests(settings, limit=10)
+    per_account = db.per_account_stats(settings, days=30)
+    homes_configured = getattr(settings, "codex_homes", ()) or ()
     body = f"""
       <div class="page-head">
         <h2>Overview</h2>
@@ -274,6 +276,7 @@ def _overview_page(settings: Any, prefix: str) -> str:
         <div><strong>{stats['request_count']}</strong><span>Requests</span></div>
         <div><strong>{stats['queued_count']}</strong><span>Queued / running</span></div>
       </section>
+      {_codex_accounts_section(homes_configured, per_account)}
       <section>
         <div class="section-title">
           <h2>Recent activity</h2>
@@ -283,6 +286,117 @@ def _overview_page(settings: Any, prefix: str) -> str:
       </section>
     """
     return _shell("Overview", "overview", prefix, body)
+
+
+def _codex_accounts_section(
+    homes_configured: tuple[str, ...],
+    per_account: list[dict[str, Any]],
+) -> str:
+    """Render a card per configured CODEX_HOME with usage + auth freshness.
+
+    Only shows when multi-account is on (more than one home configured)
+    OR when DB has actually recorded a non-empty codex_home — single-
+    account deployments stay visually quiet.
+    """
+    has_data = any(row.get("codex_home") for row in per_account)
+    if len(homes_configured) <= 1 and not has_data:
+        return ""
+
+    by_path = {row["codex_home"]: row for row in per_account}
+
+    cards = []
+    seen: set[str] = set()
+    for home in homes_configured:
+        seen.add(home)
+        stats = by_path.get(home, {"total": 0, "succeeded": 0, "failed": 0, "last_seen": None})
+        cards.append(_codex_account_card(home, stats, configured=True))
+
+    # also show any historical homes that appeared in DB but aren't currently configured
+    for row in per_account:
+        h = row.get("codex_home") or ""
+        if h and h not in seen:
+            cards.append(_codex_account_card(h, row, configured=False))
+
+    return f"""
+      <section>
+        <div class="section-title">
+          <h2>Codex accounts</h2>
+          <span class="muted" style="font-size: 13px">last 30 days · round-robin</span>
+        </div>
+        <div class="account-grid">{''.join(cards)}</div>
+      </section>
+    """
+
+
+def _codex_account_card(
+    home_path: str,
+    stats: dict[str, Any],
+    *,
+    configured: bool,
+) -> str:
+    """One CODEX_HOME → one card. Reads auth.json's last_refresh + account_id
+    if reachable, otherwise falls back to "auth.json unreadable"."""
+    import json as _json
+    label = _short_home_label(home_path) or home_path
+    total = int(stats.get("total") or 0)
+    succeeded = int(stats.get("succeeded") or 0)
+    failed = int(stats.get("failed") or 0)
+    last_seen = stats.get("last_seen")
+    success_pct = round(100 * succeeded / total) if total else None
+
+    auth_status = "<span class='chip chip-mute'>auth.json not found</span>"
+    last_refresh_str = ""
+    account_hint = ""
+    try:
+        auth_path = Path(home_path) / "auth.json"
+        if auth_path.is_file():
+            data = _json.loads(auth_path.read_text(encoding="utf-8"))
+            last_refresh = data.get("last_refresh") or ""
+            account_id = (data.get("tokens") or {}).get("account_id") or ""
+            if last_refresh:
+                last_refresh_str = _relative_time(last_refresh)
+                # access tokens last 10 days — warn when last_refresh is older
+                try:
+                    ts = datetime.fromisoformat(last_refresh.replace("Z", "+00:00"))
+                    age_days = (datetime.now(timezone.utc) - ts).days
+                    if age_days > 9:
+                        auth_status = "<span class='chip chip-fail'>token may be expired</span>"
+                    elif age_days > 6:
+                        auth_status = "<span class='chip chip-queue'>refresh soon</span>"
+                    else:
+                        auth_status = "<span class='chip chip-ok'>healthy</span>"
+                except ValueError:
+                    auth_status = "<span class='chip chip-mute'>refresh time unreadable</span>"
+            if account_id:
+                account_hint = f"<code class='handle'>account {account_id[:8]}…</code>"
+    except Exception:
+        auth_status = "<span class='chip chip-fail'>auth.json read error</span>"
+
+    status_chip = (
+        "<span class='chip chip-ok'>configured</span>"
+        if configured
+        else "<span class='chip chip-mute'>historical</span>"
+    )
+
+    return f"""
+      <div class="account-card">
+        <div class="account-head">
+          <strong class='key-name'>{html.escape(label)}</strong>
+          {status_chip}
+        </div>
+        <div class="account-meta">{account_hint or '&nbsp;'}</div>
+        <div class="account-stats">
+          <div><strong>{total}</strong><span>Requests</span></div>
+          <div><strong>{succeeded}</strong><span>Succeeded</span></div>
+          <div><strong>{failed}</strong><span>Failed</span></div>
+        </div>
+        <div class="account-footer">
+          <span>Auth: {auth_status}</span>
+          <span>{'last_refresh ' + last_refresh_str if last_refresh_str else 'last_refresh —'}</span>
+          <span>{'last_used ' + _relative_time(last_seen) if last_seen else 'last_used —'}</span>
+        </div>
+      </div>
+    """
 
 
 def _keys_page(settings: Any, prefix: str, new_api_key: str | None = None) -> str:
@@ -553,11 +667,14 @@ def _requests_table(requests: list[dict[str, Any]], settings: Any) -> str:
             "<button class='danger' type='submit'>Delete</button>"
             "</form>"
         )
+        codex_home = item.get("codex_home") or ""
+        home_label = _short_home_label(codex_home) if codex_home else "—"
         rows.append(
             "<tr>"
             f"<td><code>{html.escape(item['id'])}</code></td>"
             f"<td>{_status_chip(item['status'])}</td>"
             f"<td>{html.escape(item.get('api_key_name') or '—')}</td>"
+            f"<td title='{html.escape(codex_home)}'>{html.escape(home_label)}</td>"
             f"<td>{_relative_time(item['created_at'])}</td>"
             f"<td>{_relative_time(item['expires_at'])}</td>"
             f"<td>{', '.join(links) or '—'}</td>"
@@ -567,14 +684,27 @@ def _requests_table(requests: list[dict[str, Any]], settings: Any) -> str:
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='9' class='empty'>No image requests yet.</td></tr>")
+        rows.append("<tr><td colspan='10' class='empty'>No image requests yet.</td></tr>")
     return (
-        "<table><thead><tr><th>ID</th><th>Status</th><th>Key</th><th>Created</th>"
+        "<table><thead><tr><th>ID</th><th>Status</th><th>Key</th>"
+        "<th title='Which CODEX_HOME (ChatGPT account) ran this request'>Account</th>"
+        "<th>Created</th>"
         "<th title='Auto-deleted after this time by the scheduled cleanup'>Expires</th>"
         "<th>Images</th><th>Prompt</th><th>Error</th><th>Action</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
     )
+
+
+def _short_home_label(home_path: str) -> str:
+    """Pull the last meaningful path segment for display in tables.
+
+    `/host_codex_homes/personal` → `personal`
+    `/root/.codex`              → `.codex` (single-account default)
+    """
+    if not home_path:
+        return ""
+    return Path(home_path.rstrip("/")).name or home_path
 
 
 def _login_form(prefix: str, error: str | None = None) -> str:
@@ -926,6 +1056,57 @@ _STYLES = """
   tbody tr:hover { background: #fff8f9; }
   td.actions { white-space: nowrap; }
   td.empty { text-align: center; color: var(--muted); padding: 32px 12px; }
+
+  /* ---- codex accounts grid ---- */
+  .account-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .account-card {
+    background: white;
+    border: 1px solid var(--card-edge);
+    border-radius: 14px;
+    padding: 16px 18px;
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .account-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .account-meta {
+    font-size: 12px;
+    color: var(--muted);
+    min-height: 1.2em;
+  }
+  .account-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .account-stats > div {
+    background: #fffafb;
+    border: 1px solid #f3e8eb;
+    border-radius: 10px;
+    padding: 8px 10px;
+    text-align: center;
+  }
+  .account-stats strong { display: block; font-size: 20px; font-weight: 700; color: var(--ink); }
+  .account-stats span { color: var(--muted); font-size: 11.5px; }
+  .account-footer {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--muted);
+    padding-top: 6px;
+    border-top: 1px solid #f3e8eb;
+  }
 
   /* ---- chips ---- */
   .chip {
