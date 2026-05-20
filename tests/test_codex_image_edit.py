@@ -92,13 +92,13 @@ class EditModeRouting(unittest.TestCase):
 
             captured = {}
 
-            async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_path=None, codex_home=None):
+            async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_paths, codex_home=None):
                 captured["run_dir"] = run_dir
-                captured["reference_path"] = reference_path
+                captured["reference_paths"] = list(reference_paths)
                 captured["instruction_kwargs"] = dict(
                     prompt=prompt, size=size, quality=quality,
                     output_path=output_path, index=index, count=count,
-                    reference_path=reference_path,
+                    reference_paths=reference_paths,
                 )
                 # Also capture the rendered instruction text so the test can
                 # assert against it.
@@ -117,10 +117,10 @@ class EditModeRouting(unittest.TestCase):
                     )
                 )
             # snapshot file state while the TemporaryDirectory is still alive
-            ref = captured.get("reference_path")
-            captured["reference_bytes"] = ref.read_bytes() if ref and ref.exists() else None
-            captured["reference_parent_name"] = ref.parent.name if ref else None
-            captured["reference_suffix"] = ref.suffix if ref else None
+            paths = captured.get("reference_paths") or []
+            captured["reference_bytes"] = paths[0].read_bytes() if paths else None
+            captured["reference_parent_name"] = paths[0].parent.name if paths else None
+            captured["reference_suffix"] = paths[0].suffix if paths else None
             return captured, workdir / request_id
 
     def test_reference_saved_with_correct_extension(self):
@@ -129,7 +129,7 @@ class EditModeRouting(unittest.TestCase):
             reference_b64=base64.b64encode(png_bytes).decode("ascii"),
             request_id="img_test_ext",
         )
-        self.assertIsNotNone(captured["reference_path"])
+        self.assertTrue(len(captured["reference_paths"]) > 0)
         self.assertEqual(captured["reference_suffix"], ".png")
         self.assertEqual(captured["reference_bytes"], png_bytes)
         self.assertEqual(captured["reference_parent_name"], "img_test_ext")
@@ -149,10 +149,11 @@ class EditModeRouting(unittest.TestCase):
         # Canonical scaffolding from sample-prompts.md so gpt-5.5 routes to
         # the image_gen tool instead of hand-rolling PIL code
         self.assertIn("Use case: image-edit", text)
-        self.assertIn("Input images: Image 1:", text)
+        self.assertIn("Image 1:", text)
+        self.assertIn("Input images:", text)
         self.assertIn("Primary request:", text)
         # And references the saved reference file by absolute path
-        self.assertIn(str(captured["reference_path"].resolve()), text)
+        self.assertIn(str(captured["reference_paths"][0].resolve()), text)
         # Belt-and-braces guard against the model writing code
         self.assertIn("Do NOT write Python", text)
 
@@ -170,13 +171,13 @@ class EditModeRouting(unittest.TestCase):
 
             captured = {}
 
-            async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_path=None, codex_home=None):
+            async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_paths, codex_home=None):
                 captured["instruction"] = gen._instruction(
                     prompt=prompt, size=size, quality=quality,
                     output_path=output_path, index=index, count=count,
-                    reference_path=reference_path,
+                    reference_paths=reference_paths,
                 )
-                captured["reference_path"] = reference_path
+                captured["reference_paths"] = list(reference_paths)
                 return ("fake-cmd", "", "")
 
             with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
@@ -191,7 +192,7 @@ class EditModeRouting(unittest.TestCase):
                     )
                 )
 
-        self.assertIsNone(captured["reference_path"])
+        self.assertEqual(captured["reference_paths"], [])
         self.assertIn("create an image", captured["instruction"])
         self.assertNotIn("edit", captured["instruction"].lower().split("an")[0])
 
@@ -245,13 +246,13 @@ class RoundRobinHomes(unittest.TestCase):
         call_idx = [0]
         png_bytes = _make_png_bytes()
 
-        async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_path=None, codex_home=None):
+        async def fake_run(self_, *, run_dir, output_path, prompt, size, quality, index, count, reference_paths=(), codex_home=None):
             captured["homes_used"].append(codex_home)
             captured["instructions"].append(
                 self_._instruction(
                     prompt=prompt, size=size, quality=quality,
                     output_path=output_path, index=index, count=count,
-                    reference_path=reference_path,
+                    reference_paths=reference_paths,
                 )
             )
             i = call_idx[0]
@@ -347,6 +348,233 @@ class RoundRobinHomes(unittest.TestCase):
                 ))
         # Only one attempt — no retry when only one home configured
         self.assertEqual(captured["homes_used"], ["/h/only"])
+
+
+class MultiImageRouting(unittest.TestCase):
+    """Verify multi-image edit plumbing: every reference is saved, list flows down."""
+
+    def _run(self, *, reference_b64_list, request_id="img_multi"):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            workdir = tmp_path / "runs"
+            generated = tmp_path / "generated"
+            workdir.mkdir()
+            generated.mkdir()
+            settings = _settings_for(workdir, generated)
+            gen = CodexImageGenerator(settings)
+
+            target = generated / f"{request_id}.png"
+            target.write_bytes(_make_png_bytes())
+
+            captured = {}
+
+            async def fake_run(
+                self_,
+                *,
+                run_dir,
+                output_path,
+                prompt,
+                size,
+                quality,
+                index,
+                count,
+                reference_paths,
+                codex_home=None,
+            ):
+                captured["reference_paths"] = list(reference_paths)
+                captured["instruction"] = gen._instruction(
+                    prompt=prompt,
+                    size=size,
+                    quality=quality,
+                    output_path=output_path,
+                    index=index,
+                    count=count,
+                    reference_paths=reference_paths,
+                )
+                return ("fake-cmd", "fake-stdout", "fake-stderr")
+
+            with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+                asyncio.run(
+                    gen.generate(
+                        request_id=request_id,
+                        prompt="把第一張人物放到第二張的場景",
+                        size="1024x1024",
+                        quality="medium",
+                        count=3,  # edit mode still clamps to 1
+                        reference_images_base64=reference_b64_list,
+                    )
+                )
+
+            snapshots = [(p.name, p.read_bytes()) for p in captured["reference_paths"]]
+            captured["snapshots"] = snapshots
+            return captured
+
+    def test_two_references_saved_with_indexed_names(self):
+        png = _make_png_bytes()
+        captured = self._run(
+            reference_b64_list=[
+                base64.b64encode(png).decode("ascii"),
+                base64.b64encode(png).decode("ascii"),
+            ],
+            request_id="img_two_refs",
+        )
+        names = [name for name, _ in captured["snapshots"]]
+        self.assertEqual(names, ["reference_1.png", "reference_2.png"])
+        for _, blob in captured["snapshots"]:
+            self.assertEqual(blob, png)
+
+    def test_single_reference_via_plural_field_uses_indexed_name(self):
+        png = _make_png_bytes()
+        captured = self._run(
+            reference_b64_list=[base64.b64encode(png).decode("ascii")],
+            request_id="img_one_ref_plural",
+        )
+        names = [name for name, _ in captured["snapshots"]]
+        self.assertEqual(names, ["reference_1.png"])
+
+    def test_instruction_enumerates_each_image(self):
+        png = _make_png_bytes()
+        captured = self._run(
+            reference_b64_list=[
+                base64.b64encode(png).decode("ascii"),
+                base64.b64encode(png).decode("ascii"),
+                base64.b64encode(png).decode("ascii"),
+            ],
+            request_id="img_three_refs",
+        )
+        text = captured["instruction"]
+        # The scaffolding lists every input image explicitly so image_gen
+        # knows which is which when the prompt references them by number.
+        self.assertIn("Image 1:", text)
+        self.assertIn("Image 2:", text)
+        self.assertIn("Image 3:", text)
+        # The constraint line should generalize to all input images, not
+        # name only Image 1.
+        self.assertNotIn("geometry of Image 1 except", text)
+        # All three reference paths should be embedded
+        for ref in captured["reference_paths"]:
+            self.assertIn(str(ref.resolve()), text)
+
+
+class CodexArgvBuilder(unittest.TestCase):
+    """Verify the real subprocess argv has one --image per reference and -- after."""
+
+    def test_two_references_produce_two_image_flags(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            workdir = tmp_path / "runs"
+            generated = tmp_path / "generated"
+            workdir.mkdir()
+            generated.mkdir()
+            settings = _settings_for(workdir, generated)
+            gen = CodexImageGenerator(settings)
+            target = generated / "img_argv.png"
+            target.write_bytes(_make_png_bytes())
+
+            captured_argv = {}
+
+            class FakeProc:
+                returncode = 0
+
+                async def communicate(self):
+                    return b"stdout", b"session id: 00000000-0000-0000-0000-000000000000\n"
+
+            async def fake_exec(*args, **kwargs):
+                captured_argv["argv"] = list(args)
+                captured_argv["env"] = kwargs.get("env")
+                target.write_bytes(_make_png_bytes())
+                return FakeProc()
+
+            png_b64 = base64.b64encode(_make_png_bytes()).decode("ascii")
+            with patch("asyncio.create_subprocess_exec", new=fake_exec):
+                asyncio.run(
+                    gen.generate(
+                        request_id="img_argv",
+                        prompt="put person from image 1 into image 2",
+                        size="1024x1024",
+                        quality="medium",
+                        count=1,
+                        reference_images_base64=[png_b64, png_b64],
+                    )
+                )
+
+            argv = captured_argv["argv"]
+            image_positions = [i for i, a in enumerate(argv) if a == "--image"]
+            self.assertEqual(len(image_positions), 2)
+            sep_pos = argv.index("--")
+            self.assertGreater(sep_pos, image_positions[-1] + 1)
+            self.assertTrue(argv[-1].startswith("Call the built-in image_gen"))
+
+
+class JobQueueWiring(unittest.TestCase):
+    """End-to-end: ImageGenerateRequest → _run_job → generate() carries the list."""
+
+    def test_run_job_forwards_resolved_reference_images(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        from app import db
+        from app.services.job_queue import ImageJobQueue, ImageJob
+        from app.services.codex_image import CodexGenerationResult
+        from app.models import ImageGenerateRequest
+
+        async def scenario():
+            with TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                workdir = tmp_path / "runs"
+                generated = tmp_path / "generated"
+                workdir.mkdir()
+                generated.mkdir()
+                settings = _settings_for(workdir, generated)
+                db.init_db(settings)
+                api_key, _ = db.create_api_key(settings, "wiring-test")
+                payload = ImageGenerateRequest(
+                    prompt="combine these two",
+                    reference_images_base64=["AAAA", "BBBB"],
+                )
+                db.insert_image_request(
+                    settings,
+                    request_id="job_wiring",
+                    api_key_id=api_key["id"],
+                    prompt=payload.prompt,
+                    size=payload.size,
+                    quality=payload.quality,
+                    count=payload.count,
+                    expires_at=(db.utc_now() + timedelta(days=1)).isoformat(),
+                )
+                queue = ImageJobQueue(settings)
+                loop = asyncio.get_running_loop()
+                job = ImageJob(
+                    request_id="job_wiring",
+                    api_key_id=api_key["id"],
+                    payload=payload,
+                    expires_at=(db.utc_now() + timedelta(days=1)).isoformat(),
+                    future=loop.create_future(),
+                )
+
+                captured = {}
+
+                async def fake_generate(**kwargs):
+                    captured.update(kwargs)
+                    fake_image = generated / "job_wiring_0.png"
+                    fake_image.write_bytes(_make_png_bytes())
+                    return CodexGenerationResult(
+                        image_paths=[fake_image],
+                        stdout="",
+                        stderr="",
+                        duration_seconds=0.1,
+                        workdir=workdir / "job_wiring",
+                        command="fake",
+                    )
+
+                with patch.object(queue.generator, "generate", new=fake_generate):
+                    await queue._run_job(job)
+                return captured
+
+        captured = asyncio.run(scenario())
+        self.assertEqual(
+            captured.get("reference_images_base64"),
+            ["AAAA", "BBBB"],
+        )
 
 
 if __name__ == "__main__":

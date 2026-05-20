@@ -141,32 +141,45 @@ class CodexImageGenerator:
         size: str,
         quality: str,
         count: int,
-        reference_image_base64: str | None = None,
+        reference_image_base64: str | None = None,  # backwards-compat alias
+        reference_images_base64: list[str] | None = None,
     ) -> CodexGenerationResult:
         storage.ensure_storage(self.settings)
         run_dir = self.settings.codex_workdir / request_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        # Edit mode: decode the base64 reference once and persist it inside
-        # the per-job workdir so Codex CLI can read it from a stable path.
-        # count is clamped to 1 because gpt-image-2 edit returns a single image.
-        reference_path: Path | None = None
-        if reference_image_base64:
+        # Normalize inputs into a single list. Plural wins; singular is a
+        # legacy alias for callers that haven't migrated yet.
+        if reference_images_base64:
+            references_b64 = list(reference_images_base64)
+        elif reference_image_base64:
+            references_b64 = [reference_image_base64]
+        else:
+            references_b64 = []
+
+        # Edit mode: decode each base64 reference once and persist it inside
+        # the per-job workdir so codex CLI can read each from a stable path.
+        # count is clamped to 1 because gpt-image-2 edit returns one image
+        # regardless of how many input references the model is given.
+        reference_paths: list[Path] = []
+        for idx, b64 in enumerate(references_b64, start=1):
             try:
-                ref_bytes = base64.b64decode(reference_image_base64, validate=True)
+                ref_bytes = base64.b64decode(b64, validate=True)
             except (binascii.Error, ValueError) as exc:
                 raise CodexGenerationError(
-                    f"reference_image_base64 is not valid base64: {exc}",
+                    f"reference_images_base64[{idx - 1}] is not valid base64: {exc}",
                     workdir=run_dir,
                 ) from exc
             if not ref_bytes:
                 raise CodexGenerationError(
-                    "reference_image_base64 decoded to zero bytes",
+                    f"reference_images_base64[{idx - 1}] decoded to zero bytes",
                     workdir=run_dir,
                 )
             ext = _detect_image_ext(ref_bytes)
-            reference_path = run_dir / f"reference{ext}"
-            reference_path.write_bytes(ref_bytes)
+            ref_path = run_dir / f"reference_{idx}{ext}"
+            ref_path.write_bytes(ref_bytes)
+            reference_paths.append(ref_path)
+        if reference_paths:
             count = 1  # edit mode is single-output
 
         image_paths: list[Path] = []
@@ -187,24 +200,17 @@ class CodexImageGenerator:
                     quality=quality,
                     index=index,
                     count=count,
-                    reference_path=reference_path,
+                    reference_paths=reference_paths,
                 )
                 command_display = command
                 codex_home_used = picked_home
                 stdout_parts.append(stdout)
                 stderr_parts.append(stderr)
                 if not output_path.exists():
-                    # 1) Look inside the per-job workdir for anything Codex
-                    #    might have copied/written here (excluding the input
-                    #    reference so we don't false-positive on it).
                     fallback = self._find_generated_image(
-                        run_dir, exclude={reference_path} if reference_path else set()
+                        run_dir,
+                        exclude=set(reference_paths),
                     )
-                    # 2) Edit-mode often leaves the result only in
-                    #    $CODEX_HOME/generated_images/<session>/ig_*.png and
-                    #    the model forgets the final cp step. Recover it —
-                    #    looking under the SAME CODEX_HOME the subprocess used
-                    #    (critical for multi-account / round-robin runs).
                     if not fallback:
                         fallback = _find_generated_in_session(
                             stderr, codex_home=codex_home_used
@@ -246,7 +252,7 @@ class CodexImageGenerator:
         quality: str,
         index: int,
         count: int,
-        reference_path: Path | None = None,
+        reference_paths: list[Path],
     ) -> tuple[str, str, str, str | None]:
         """Wrap _run_codex_once with cross-account retry.
 
@@ -272,7 +278,7 @@ class CodexImageGenerator:
                     quality=quality,
                     index=index,
                     count=count,
-                    reference_path=reference_path,
+                    reference_paths=reference_paths,
                     codex_home=picked_home,
                 )
                 return command, stdout, stderr, picked_home
@@ -314,7 +320,7 @@ class CodexImageGenerator:
         quality: str,
         index: int,
         count: int,
-        reference_path: Path | None = None,
+        reference_paths: list[Path],
         codex_home: str | None = None,
     ) -> tuple[str, str, str]:
         instruction = self._instruction(
@@ -324,7 +330,7 @@ class CodexImageGenerator:
             output_path=output_path,
             index=index,
             count=count,
-            reference_path=reference_path,
+            reference_paths=reference_paths,
         )
         command = [
             "codex",
@@ -334,14 +340,14 @@ class CodexImageGenerator:
             "-C",
             str(run_dir),
         ]
-        # Edit mode: attach the reference as a real user-message image so the
-        # built-in image_gen tool can pass its bytes to gpt-image-2 edit.
-        # Putting the path in prompt text alone is not enough — the model sees
-        # "path" as text and never hands the image to the tool.
-        # `--image` is variadic in clap, so we need `--` before the positional
-        # prompt or it gets eaten as another image filename.
-        if reference_path is not None:
-            command.extend(["--image", str(reference_path.resolve()), "--"])
+        # Edit mode: attach each reference as its own --image so codex CLI
+        # passes every one to the built-in image_gen tool. --image is
+        # variadic in clap; the `--` separator before the positional
+        # prompt stops the prompt being eaten as another image filename.
+        if reference_paths:
+            for ref in reference_paths:
+                command.extend(["--image", str(ref.resolve())])
+            command.append("--")
         command.append(instruction)
         command_display = " ".join(command[:-1]) + " <imagegen prompt>"
         # start_new_session=True puts codex in its own process group so we can
@@ -369,9 +375,7 @@ class CodexImageGenerator:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
-                # codex already exited or we have no rights — fall through
                 pass
-            # Bound the post-kill drain so a slow OS cleanup can't hang us.
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     process.communicate(), timeout=5
@@ -407,27 +411,35 @@ class CodexImageGenerator:
         output_path: Path,
         index: int,
         count: int,
-        reference_path: Path | None = None,
+        reference_paths: list[Path],
     ) -> str:
         image_label = f"image {index + 1} of {count}" if count > 1 else "the image"
-        if reference_path is not None:
-            # Format follows the canonical edit-prompt scaffolding documented
-            # in $CODEX_HOME/skills/.system/imagegen/references/sample-prompts.md
-            # ("Use case / Input images / Primary request / Constraints"). The
-            # built-in image_gen tool keys off this shape; deviating from it
-            # makes gpt-5.5 hand-roll PIL/Python code instead of calling the
-            # tool, which silently times out for non-trivial images.
+        if reference_paths:
+            input_lines = "\n".join(
+                f"Image {i}: {p.resolve()}" for i, p in enumerate(reference_paths, start=1)
+            )
+            if len(reference_paths) == 1:
+                constraint = (
+                    "Constraints: preserve the subject identity, framing, and "
+                    "geometry of the input image except where the request asks otherwise."
+                )
+            else:
+                constraint = (
+                    "Constraints: treat the input images as references the user is "
+                    "composing with — preserve identity and content from each image "
+                    "as the request implies (e.g. subject from Image 1, scene from "
+                    "Image 2). The prompt below tells you how to combine them."
+                )
             return (
-                "Call the built-in image_gen tool to edit the input image. "
+                "Call the built-in image_gen tool to edit using the input image(s). "
                 "Do NOT write Python, shell, or any code to transform the "
                 "image yourself — the only correct action is one call to "
                 "image_gen with the user's edit request.\n"
                 "$imagegen\n"
                 "Use case: image-edit\n"
-                f"Input images: Image 1: {reference_path.resolve()}\n"
+                f"Input images:\n{input_lines}\n"
                 f"Primary request: {prompt}\n"
-                "Constraints: preserve the subject identity, framing, and "
-                "geometry of Image 1 except where the request asks otherwise.\n"
+                f"{constraint}\n"
                 f"Output size: {size}\n"
                 f"Quality: {quality}\n"
                 f"Save the resulting PNG image exactly at this path: {output_path.resolve()}\n"
@@ -454,9 +466,9 @@ class CodexImageGenerator:
         )
 
     def _find_generated_image(
-        self, run_dir: Path, exclude: set[Path | None] | None = None
+        self, run_dir: Path, exclude: set[Path] | None = None
     ) -> Path | None:
-        excluded = {p.resolve() for p in (exclude or set()) if p is not None}
+        excluded = {p.resolve() for p in (exclude or set())}
         candidates = [
             path
             for path in run_dir.rglob("*")
