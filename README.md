@@ -202,6 +202,23 @@ a small cron) to keep them fresh:
 for h in ~/codex-homes/*/; do CODEX_HOME="$h" codex --version >/dev/null; done
 ```
 
+## Troubleshooting
+
+**`502 Bad Gateway` + container in a restart loop, logs show
+`sqlite3.OperationalError: attempt to write a readonly database` or
+`Permission denied`** — this means bind-mounted host files are root-owned
+from an earlier container that ran as root, but the current container
+runs as your host UID (1000 by default). One-time fix:
+
+```bash
+sudo chown -R $USER:$USER ./data ./static ~/codex-homes
+rm -f ./data/app.db-wal ./data/app.db-shm   # clear any stale SQLite WAL/SHM
+docker compose up -d --build
+```
+
+After this, the container's uid stays in sync with your host user and
+new writes preserve ownership automatically.
+
 ## Cleanup
 
 Each `image_requests` row expires at `created_at + IMAGE_RETENTION_DAYS`.
