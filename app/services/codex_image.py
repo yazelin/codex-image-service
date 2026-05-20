@@ -141,32 +141,45 @@ class CodexImageGenerator:
         size: str,
         quality: str,
         count: int,
-        reference_image_base64: str | None = None,
+        reference_image_base64: str | None = None,  # backwards-compat alias
+        reference_images_base64: list[str] | None = None,
     ) -> CodexGenerationResult:
         storage.ensure_storage(self.settings)
         run_dir = self.settings.codex_workdir / request_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        # Edit mode: decode the base64 reference once and persist it inside
-        # the per-job workdir so Codex CLI can read it from a stable path.
-        # count is clamped to 1 because gpt-image-2 edit returns a single image.
-        reference_path: Path | None = None
-        if reference_image_base64:
+        # Normalize inputs into a single list. Plural wins; singular is a
+        # legacy alias for callers that haven't migrated yet.
+        if reference_images_base64:
+            references_b64 = list(reference_images_base64)
+        elif reference_image_base64:
+            references_b64 = [reference_image_base64]
+        else:
+            references_b64 = []
+
+        # Edit mode: decode each base64 reference once and persist it inside
+        # the per-job workdir so codex CLI can read each from a stable path.
+        # count is clamped to 1 because gpt-image-2 edit returns one image
+        # regardless of how many input references the model is given.
+        reference_paths: list[Path] = []
+        for idx, b64 in enumerate(references_b64, start=1):
             try:
-                ref_bytes = base64.b64decode(reference_image_base64, validate=True)
+                ref_bytes = base64.b64decode(b64, validate=True)
             except (binascii.Error, ValueError) as exc:
                 raise CodexGenerationError(
-                    f"reference_image_base64 is not valid base64: {exc}",
+                    f"reference_images_base64[{idx - 1}] is not valid base64: {exc}",
                     workdir=run_dir,
                 ) from exc
             if not ref_bytes:
                 raise CodexGenerationError(
-                    "reference_image_base64 decoded to zero bytes",
+                    f"reference_images_base64[{idx - 1}] decoded to zero bytes",
                     workdir=run_dir,
                 )
             ext = _detect_image_ext(ref_bytes)
-            reference_path = run_dir / f"reference{ext}"
-            reference_path.write_bytes(ref_bytes)
+            ref_path = run_dir / f"reference_{idx}{ext}"
+            ref_path.write_bytes(ref_bytes)
+            reference_paths.append(ref_path)
+        if reference_paths:
             count = 1  # edit mode is single-output
 
         image_paths: list[Path] = []
@@ -187,24 +200,17 @@ class CodexImageGenerator:
                     quality=quality,
                     index=index,
                     count=count,
-                    reference_path=reference_path,
+                    reference_paths=reference_paths,
                 )
                 command_display = command
                 codex_home_used = picked_home
                 stdout_parts.append(stdout)
                 stderr_parts.append(stderr)
                 if not output_path.exists():
-                    # 1) Look inside the per-job workdir for anything Codex
-                    #    might have copied/written here (excluding the input
-                    #    reference so we don't false-positive on it).
                     fallback = self._find_generated_image(
-                        run_dir, exclude={reference_path} if reference_path else set()
+                        run_dir,
+                        exclude=set(reference_paths),
                     )
-                    # 2) Edit-mode often leaves the result only in
-                    #    $CODEX_HOME/generated_images/<session>/ig_*.png and
-                    #    the model forgets the final cp step. Recover it —
-                    #    looking under the SAME CODEX_HOME the subprocess used
-                    #    (critical for multi-account / round-robin runs).
                     if not fallback:
                         fallback = _find_generated_in_session(
                             stderr, codex_home=codex_home_used
@@ -246,7 +252,7 @@ class CodexImageGenerator:
         quality: str,
         index: int,
         count: int,
-        reference_path: Path | None = None,
+        reference_paths: list[Path],
     ) -> tuple[str, str, str, str | None]:
         """Wrap _run_codex_once with cross-account retry.
 
@@ -272,7 +278,7 @@ class CodexImageGenerator:
                     quality=quality,
                     index=index,
                     count=count,
-                    reference_path=reference_path,
+                    reference_paths=reference_paths,
                     codex_home=picked_home,
                 )
                 return command, stdout, stderr, picked_home
@@ -314,9 +320,11 @@ class CodexImageGenerator:
         quality: str,
         index: int,
         count: int,
-        reference_path: Path | None = None,
+        reference_paths: list[Path],
         codex_home: str | None = None,
     ) -> tuple[str, str, str]:
+        # Shim: Task 3 will wire all paths; for now use the first reference only.
+        reference_path = reference_paths[0] if reference_paths else None
         instruction = self._instruction(
             prompt=prompt,
             size=size,
@@ -408,7 +416,11 @@ class CodexImageGenerator:
         index: int,
         count: int,
         reference_path: Path | None = None,
+        reference_paths: list[Path] | None = None,
     ) -> str:
+        # Plural wins; singular is the Task-2 shim until Task 3 rewires fully.
+        if reference_paths is not None:
+            reference_path = reference_paths[0] if reference_paths else None
         image_label = f"image {index + 1} of {count}" if count > 1 else "the image"
         if reference_path is not None:
             # Format follows the canonical edit-prompt scaffolding documented
@@ -454,9 +466,9 @@ class CodexImageGenerator:
         )
 
     def _find_generated_image(
-        self, run_dir: Path, exclude: set[Path | None] | None = None
+        self, run_dir: Path, exclude: set[Path] | None = None
     ) -> Path | None:
-        excluded = {p.resolve() for p in (exclude or set()) if p is not None}
+        excluded = {p.resolve() for p in (exclude or set())}
         candidates = [
             path
             for path in run_dir.rglob("*")

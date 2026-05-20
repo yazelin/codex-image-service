@@ -349,5 +349,88 @@ class RoundRobinHomes(unittest.TestCase):
         self.assertEqual(captured["homes_used"], ["/h/only"])
 
 
+class MultiImageRouting(unittest.TestCase):
+    """Verify multi-image edit plumbing: every reference is saved, list flows down."""
+
+    def _run(self, *, reference_b64_list, request_id="img_multi"):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            workdir = tmp_path / "runs"
+            generated = tmp_path / "generated"
+            workdir.mkdir()
+            generated.mkdir()
+            settings = _settings_for(workdir, generated)
+            gen = CodexImageGenerator(settings)
+
+            target = generated / f"{request_id}.png"
+            target.write_bytes(_make_png_bytes())
+
+            captured = {}
+
+            async def fake_run(
+                self_,
+                *,
+                run_dir,
+                output_path,
+                prompt,
+                size,
+                quality,
+                index,
+                count,
+                reference_paths,
+                codex_home=None,
+            ):
+                captured["reference_paths"] = list(reference_paths)
+                captured["instruction"] = gen._instruction(
+                    prompt=prompt,
+                    size=size,
+                    quality=quality,
+                    output_path=output_path,
+                    index=index,
+                    count=count,
+                    reference_paths=reference_paths,
+                )
+                return ("fake-cmd", "fake-stdout", "fake-stderr")
+
+            with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+                asyncio.run(
+                    gen.generate(
+                        request_id=request_id,
+                        prompt="把第一張人物放到第二張的場景",
+                        size="1024x1024",
+                        quality="medium",
+                        count=3,  # edit mode still clamps to 1
+                        reference_images_base64=reference_b64_list,
+                    )
+                )
+
+            snapshots = [(p.name, p.read_bytes()) for p in captured["reference_paths"]]
+            captured["snapshots"] = snapshots
+            return captured
+
+    def test_two_references_saved_with_indexed_names(self):
+        png = _make_png_bytes()
+        captured = self._run(
+            reference_b64_list=[
+                base64.b64encode(png).decode("ascii"),
+                base64.b64encode(png).decode("ascii"),
+            ],
+            request_id="img_two_refs",
+        )
+        names = [name for name, _ in captured["snapshots"]]
+        self.assertEqual(names, ["reference_1.png", "reference_2.png"])
+        for _, blob in captured["snapshots"]:
+            self.assertEqual(blob, png)
+
+    def test_single_reference_via_plural_field_uses_indexed_name(self):
+        png = _make_png_bytes()
+        captured = self._run(
+            reference_b64_list=[base64.b64encode(png).decode("ascii")],
+            request_id="img_one_ref_plural",
+        )
+        names = [name for name, _ in captured["snapshots"]]
+        self.assertEqual(names, ["reference_1.png"])
+
+
 if __name__ == "__main__":
     unittest.main()
