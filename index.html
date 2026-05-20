@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>codex-image-service — turn one ChatGPT subscription into a self-hosted image API</title>
+<meta name="description" content="A small FastAPI service that wraps Codex CLI's $imagegen behind bearer-auth HTTP endpoints, so multiple internal scripts and CI jobs can share a single ChatGPT subscription quota.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23fda4af'/%3E%3Ctext x='50%25' y='58%25' text-anchor='middle' font-size='34' fill='white' font-family='ui-sans-serif,system-ui'%3E%E2%9C%BD%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --ink:        #2d3142;
+    --ink-soft:   #4a5072;
+    --muted:      #7d839b;
+    --bg-1:       #fdf8f3;
+    --bg-2:       #fff1f2;
+    --bg-3:       #eef2ff;
+    --accent-1:   #fda4af;   /* coral */
+    --accent-2:   #a5b4fc;   /* periwinkle */
+    --accent-3:   #86efac;   /* sage */
+    --accent-4:   #fcd34d;   /* warm cream */
+    --card:       #ffffffcc;
+    --card-edge:  #f0e3e5;
+    --code-bg:    #1e2336;
+    --code-ink:   #e9ecf8;
+    --shadow:     0 6px 30px -8px rgba(120,60,80,.18);
+    --radius:     18px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(ellipse 1200px 600px at 10% -10%, var(--bg-2) 0%, transparent 60%),
+      radial-gradient(ellipse 1100px 500px at 95% 5%, var(--bg-3) 0%, transparent 55%),
+      var(--bg-1);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 48px 24px 96px; }
+  header { text-align: center; padding: 48px 0 32px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 14px; border-radius: 999px;
+    background: var(--card); border: 1px solid var(--card-edge);
+    color: var(--ink-soft); font-size: 13px; font-weight: 500;
+    box-shadow: var(--shadow);
+  }
+  .badge .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent-3);
+    box-shadow: 0 0 0 4px #86efac33;
+  }
+  h1 {
+    margin: 24px 0 12px;
+    font-size: clamp(34px, 6vw, 52px);
+    line-height: 1.05; font-weight: 700;
+    letter-spacing: -0.02em; color: var(--ink);
+  }
+  h1 .accent { color: var(--accent-1); }
+  .tagline {
+    font-size: clamp(17px, 2.2vw, 20px);
+    color: var(--ink-soft); max-width: 640px; margin: 0 auto;
+  }
+  .cta {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    justify-content: center; margin-top: 28px;
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 22px; border-radius: 999px;
+    font-weight: 600; font-size: 15px;
+    text-decoration: none; transition: transform .12s ease, box-shadow .12s ease;
+    box-shadow: var(--shadow);
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.primary { background: var(--accent-1); color: white; }
+  .btn.ghost { background: var(--card); color: var(--ink); border: 1px solid var(--card-edge); }
+
+  .card {
+    background: var(--card); backdrop-filter: blur(8px);
+    border: 1px solid var(--card-edge);
+    border-radius: var(--radius);
+    padding: 28px 28px;
+    box-shadow: var(--shadow);
+    margin: 24px 0;
+  }
+  h2 { font-size: 22px; margin: 0 0 14px; letter-spacing: -0.01em; }
+  h2 .num {
+    display: inline-block; width: 28px; height: 28px; border-radius: 50%;
+    background: var(--accent-1); color: white;
+    text-align: center; line-height: 28px; font-size: 14px;
+    margin-right: 10px;
+  }
+  p { margin: 8px 0; color: var(--ink-soft); }
+  ul { margin: 8px 0 12px 22px; color: var(--ink-soft); }
+  li { margin: 4px 0; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13.5px; }
+  code.inline { background: #fff0f1; color: var(--ink); padding: 2px 6px; border-radius: 6px; }
+  pre {
+    background: var(--code-bg); color: var(--code-ink);
+    padding: 18px 20px; border-radius: 12px;
+    overflow-x: auto; line-height: 1.6;
+    box-shadow: inset 0 0 0 1px #ffffff10;
+  }
+  pre .comment { color: #8b93a8; }
+  pre .accent  { color: #fbcfe8; }
+  pre .str     { color: #fcd34d; }
+
+  .gallery {
+    display: grid; grid-template-columns: 1fr; gap: 18px; margin-top: 8px;
+  }
+  .shot {
+    border-radius: 14px; overflow: hidden;
+    border: 1px solid var(--card-edge); background: white;
+    box-shadow: var(--shadow);
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot .caption {
+    padding: 12px 16px; font-size: 13.5px; color: var(--muted);
+    border-top: 1px solid var(--card-edge); background: #fffafb;
+  }
+
+  .features {
+    display: grid; grid-template-columns: 1fr; gap: 14px;
+  }
+  @media (min-width: 720px) { .features { grid-template-columns: 1fr 1fr; } }
+  .feature {
+    padding: 18px 20px; border-radius: 14px;
+    background: white; border: 1px solid var(--card-edge);
+  }
+  .feature h3 {
+    margin: 0 0 6px; font-size: 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .feature h3 .ico {
+    width: 28px; height: 28px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 15px;
+  }
+  .ico.a1 { background: #ffe4e6; color: #be123c; }
+  .ico.a2 { background: #e0e7ff; color: #4f46e5; }
+  .ico.a3 { background: #d1fae5; color: #047857; }
+  .ico.a4 { background: #fef3c7; color: #b45309; }
+  .feature p { margin: 0; font-size: 14.5px; }
+
+  .disclaimer {
+    background: #fff8f0;
+    border: 1px dashed #f4c87a;
+    color: #6b4920;
+  }
+  .disclaimer h2 .num { background: #f59e0b; }
+  .disclaimer code.inline { background: #fef3c7; }
+
+  footer {
+    margin-top: 56px; text-align: center;
+    color: var(--muted); font-size: 14px;
+  }
+  footer a { color: var(--ink-soft); }
+
+  .lang-switch {
+    position: absolute;
+    top: 20px; right: 24px;
+    display: inline-flex; gap: 4px;
+    padding: 4px;
+    background: var(--card); border: 1px solid var(--card-edge);
+    border-radius: 999px;
+    box-shadow: var(--shadow);
+    font-size: 13px;
+  }
+  .lang-switch a, .lang-switch span {
+    padding: 5px 14px; border-radius: 999px;
+    text-decoration: none; color: var(--ink-soft);
+    transition: background .12s ease;
+  }
+  .lang-switch a:hover { background: #fff0f1; }
+  .lang-switch .active { background: var(--accent-1); color: white; }
+</style>
+</head>
+<body>
+
+<div class="wrap" style="position: relative;">
+
+  <nav class="lang-switch" aria-label="Language switcher">
+    <span class="active">EN</span>
+    <a href="zh-tw.html">繁中</a>
+  </nav>
+
+  <header>
+    <span class="badge"><span class="dot"></span>FastAPI service · personal/dev use only · MIT</span>
+    <h1>one ChatGPT subscription,<br><span class="accent">a self-hosted image API</span></h1>
+    <p class="tagline">
+      A small FastAPI wrapper around Codex CLI's <code class="inline">$imagegen</code>.
+      Issue bearer keys to your internal scripts, CI jobs, and side projects;
+      they all share one ChatGPT subscription's image-gen quota over a clean
+      HTTP endpoint.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/yazelin/codex-image-service">View on GitHub →</a>
+      <a class="btn ghost" href="#install">Install</a>
+    </div>
+  </header>
+
+  <section class="card">
+    <h2><span class="num">1</span>Why this exists</h2>
+    <p>
+      You already pay for ChatGPT. Codex CLI installed on your homelab box is
+      already logged in to it. But every internal script, CI workflow, or
+      Discord/Telegram bot that wants to generate an image has to either
+      (a) ssh into your box and shell out to <code class="inline">codex
+      exec</code>, or (b) burn separate OpenAI Images API credits.
+    </p>
+    <p>
+      This service does (c): expose <code class="inline">$imagegen</code> over
+      a tiny HTTP API behind <code class="inline">Authorization: Bearer
+      cimg_*</code>, with an admin UI to issue / revoke keys per caller.
+      One ChatGPT account, many consumers, no extra spend.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">2</span>What it produces</h2>
+    <div class="gallery">
+      <div class="shot">
+        <img src="examples/banner.webp" alt="Sample output: isometric illustration of a home-server rack with a glowing screen" loading="lazy">
+        <div class="caption">
+          1536×1024 sample generated by this service. Prompt: <em>"a clean
+          isometric illustration of a small home-server rack with one glowing
+          screen showing an abstract image being printed, soft pastel palette,
+          warm orange and dusty blue, gentle volumetric morning light,
+          friendly cozy mood, no text, no watermark."</em> Quality: <code class="inline">medium</code>.
+        </div>
+      </div>
+    </div>
+    <p style="margin-top: 16px;">
+      Under the hood it's <code class="inline">gpt-image-2</code> (the model
+      behind Codex CLI's built-in <code class="inline">image_gen</code> tool).
+      The output is whatever <code class="inline">$imagegen</code> produces —
+      this service does <em>not</em> reprocess or filter; it just delivers the
+      PNG to the caller and tracks history.
+    </p>
+  </section>
+
+  <section class="card" id="install">
+    <h2><span class="num">3</span>Install</h2>
+    <p>
+      Prerequisites: <a href="https://github.com/openai/codex">Codex CLI</a>
+      installed and <code class="inline">codex login</code> done on the host
+      that will run the container. Docker and Docker Compose installed.
+    </p>
+<pre><span class="comment"># clone</span>
+<span class="accent">git clone</span> https://github.com/yazelin/codex-image-service
+<span class="accent">cd</span> codex-image-service
+
+<span class="comment"># configure</span>
+<span class="accent">cp</span> .env.example .env
+<span class="comment"># edit .env: set ADMIN_PASSWORD, ADMIN_SESSION_SECRET, PUBLIC_BASE_URL</span>
+
+<span class="comment"># run</span>
+<span class="accent">docker compose</span> up -d --build</pre>
+    <p>
+      The service listens on port 8000 inside the Docker network
+      <code class="inline">nginx_bridge_network</code>. Front it with your
+      existing nginx using the snippet in
+      <code class="inline">deploy/nginx.codex-image-service.location.conf.example</code>.
+    </p>
+    <p>
+      First-run smoke test:
+    </p>
+<pre><span class="accent">curl</span> -sf https://YOUR-DOMAIN/codex-image/health
+<span class="comment"># {"status":"ok"}</span></pre>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">4</span>Use</h2>
+    <p>
+      Log in to <code class="inline">/codex-image/admin</code>, click
+      <strong>Create API Key</strong>, copy the <code class="inline">cimg_*</code>
+      value (shown once). Then hit the API:
+    </p>
+<pre><span class="comment"># shell / GitHub Actions</span>
+<span class="accent">curl</span> -sS --fail --max-time 650 \
+  -X POST https://YOUR-DOMAIN/codex-image/v1/images/generate \
+  -H <span class="str">"Authorization: Bearer $CODEX_IMAGE_KEY"</span> \
+  -H <span class="str">"Content-Type: application/json"</span> \
+  -d <span class="str">'{"prompt":"...","size":"1024x1024","quality":"medium","count":1}'</span></pre>
+<pre><span class="comment"># python (httpx)</span>
+<span class="accent">import</span> httpx, os
+r = httpx.post(
+    <span class="str">"https://YOUR-DOMAIN/codex-image/v1/images/generate"</span>,
+    headers={<span class="str">"Authorization"</span>: f<span class="str">"Bearer {os.environ['CODEX_IMAGE_KEY']}"</span>},
+    json={<span class="str">"prompt"</span>: <span class="str">"..."</span>, <span class="str">"size"</span>: <span class="str">"1024x1024"</span>, <span class="str">"quality"</span>: <span class="str">"medium"</span>, <span class="str">"count"</span>: 1},
+    timeout=httpx.Timeout(connect=10, read=600, write=30, pool=10),
+)
+images = r.json()[<span class="str">"images"</span>]   <span class="comment"># [{"url": "...", "expires_at": "..."}]</span></pre>
+    <p>
+      Response shape:
+    </p>
+<pre>{
+  <span class="str">"id"</span>: <span class="str">"img_3f81..."</span>,
+  <span class="str">"status"</span>: <span class="str">"succeeded"</span>,
+  <span class="str">"images"</span>: [{<span class="str">"url"</span>: <span class="str">"https://YOUR-DOMAIN/codex-image/generated/img_3f81....png"</span>,
+              <span class="str">"expires_at"</span>: <span class="str">"..."</span>}],
+  <span class="str">"created_at"</span>: <span class="str">"..."</span>
+}</pre>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">5</span>What's in the admin</h2>
+    <div class="features">
+      <div class="feature">
+        <h3><span class="ico a1">⌘</span>Issue / disable / delete keys</h3>
+        <p>Names go into the <code class="inline">api_keys</code> table; tokens stored as sha256 hashes and shown raw exactly once at creation.</p>
+      </div>
+      <div class="feature">
+        <h3><span class="ico a2">▶</span>Test image generation</h3>
+        <p>Pick a key + prompt + size + quality, queue a job from the admin UI to verify the key works without touching curl.</p>
+      </div>
+      <div class="feature">
+        <h3><span class="ico a3">⏳</span>Auto-expire images</h3>
+        <p>Each image carries an <code class="inline">expires_at</code> (default <code class="inline">IMAGE_RETENTION_DAYS=7</code>); a background sweep deletes PNGs + workdirs.</p>
+      </div>
+      <div class="feature">
+        <h3><span class="ico a4">🗑</span>Manual delete</h3>
+        <p>Per-row Delete on the Image Requests table for immediate purge — file, workdir, DB row — without waiting for expiry.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="card disclaimer">
+    <h2><span class="num">!</span>Disclaimer — personal / experimental use only</h2>
+    <p>
+      This project was built for our own development and testing inside a
+      private homelab. It is <strong>not affiliated with, endorsed by, or
+      supported by OpenAI</strong>. It wraps the official
+      <code class="inline">@openai/codex</code> CLI and re-exposes its
+      <code class="inline">$imagegen</code> skill as a small HTTP API; every
+      request consumes quota from the single ChatGPT account whose
+      <code class="inline">~/.codex/auth.json</code> is mounted into the container.
+    </p>
+    <p>
+      Things to be aware of before reusing this code:
+    </p>
+    <ul>
+      <li>Multi-tenanting a single ChatGPT login is not an OpenAI-documented pattern. Make sure your account's terms of service allow your usage scenario; you are responsible for compliance, billing, and abuse handling.</li>
+      <li>Codex CLI updates can change the <code class="inline">$imagegen</code> skill, the model behind it (<code class="inline">gpt-image-2</code>), the sandbox flags, or the on-disk layout at any time. This service may need follow-up patches.</li>
+      <li>No SLA, no warranty, no production hardening guarantees. The admin login is a single password + HMAC cookie; API keys store sha256 hashes; there is no per-key rate limit, quota, audit log, or scoping beyond enable / disable / delete.</li>
+      <li>If you fork it, audit <code class="inline">app/services/codex_image.py</code> — it runs codex with <code class="inline">--dangerously-bypass-approvals-and-sandbox</code> because bubblewrap doesn't work inside Docker — and re-think the threat model before pointing it at anything important.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <p>MIT licensed · <a href="https://github.com/yazelin/codex-image-service">github.com/yazelin/codex-image-service</a></p>
+    <p>Built collaboratively by <a href="https://github.com/yazelin">@yazelin</a> + Claude Code.</p>
+  </footer>
+
+</div>
+
+</body>
+</html>

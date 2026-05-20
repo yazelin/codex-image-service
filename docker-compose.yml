@@ -1,0 +1,26 @@
+services:
+  codex-image-service:
+    build: .
+    container_name: codex-image-service
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost}
+      ADMIN_URL_PREFIX: ${ADMIN_URL_PREFIX:-}
+      GENERATED_DIR: /app/static/generated
+      CODEX_WORKDIR: /app/data/codex-runs
+      DATABASE_URL: sqlite:////app/data/app.db
+    volumes:
+      - ./data:/app/data
+      - ./static/generated:/app/static/generated
+      - ./data/codex-home:/root/.codex
+      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
+      - ${HOME}/.codex/config.toml:/root/.codex/config.toml:ro
+    networks:
+      - nginx_bridge_network
+
+networks:
+  nginx_bridge_network:
+    external: true

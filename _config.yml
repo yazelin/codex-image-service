@@ -1,0 +1,14 @@
+# Tell GitHub Pages to serve our hand-rolled index.html and zh-tw.html as-is.
+# Without this Pages would try to render the README.md through a Jekyll theme
+# and the landing page would be hidden behind it.
+plugins: []
+exclude:
+  - README.md
+  - Dockerfile
+  - docker-compose.yml
+  - requirements.txt
+  - .env.example
+  - .dockerignore
+  - app
+  - tests
+  - deploy

@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>codex-image-service — 把一個 ChatGPT 訂閱變成自架圖片 API</title>
+<meta name="description" content="一個小巧的 FastAPI 服務，把 Codex CLI 的 $imagegen 包成 bearer-auth HTTP 端點，讓多個內部腳本與 CI 工作分享一份 ChatGPT 訂閱的產圖額度。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23fda4af'/%3E%3Ctext x='50%25' y='58%25' text-anchor='middle' font-size='34' fill='white' font-family='ui-sans-serif,system-ui'%3E%E2%9C%BD%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --ink:        #2d3142;
+    --ink-soft:   #4a5072;
+    --muted:      #7d839b;
+    --bg-1:       #fdf8f3;
+    --bg-2:       #fff1f2;
+    --bg-3:       #eef2ff;
+    --accent-1:   #fda4af;
+    --accent-2:   #a5b4fc;
+    --accent-3:   #86efac;
+    --accent-4:   #fcd34d;
+    --card:       #ffffffcc;
+    --card-edge:  #f0e3e5;
+    --code-bg:    #1e2336;
+    --code-ink:   #e9ecf8;
+    --shadow:     0 6px 30px -8px rgba(120,60,80,.18);
+    --radius:     18px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 16px/1.7 "Noto Sans TC", ui-sans-serif, system-ui, -apple-system, "PingFang TC", "Helvetica Neue", sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(ellipse 1200px 600px at 10% -10%, var(--bg-2) 0%, transparent 60%),
+      radial-gradient(ellipse 1100px 500px at 95% 5%, var(--bg-3) 0%, transparent 55%),
+      var(--bg-1);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 48px 24px 96px; }
+  header { text-align: center; padding: 48px 0 32px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 14px; border-radius: 999px;
+    background: var(--card); border: 1px solid var(--card-edge);
+    color: var(--ink-soft); font-size: 13px; font-weight: 500;
+    box-shadow: var(--shadow);
+  }
+  .badge .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent-3);
+    box-shadow: 0 0 0 4px #86efac33;
+  }
+  h1 {
+    margin: 24px 0 12px;
+    font-size: clamp(32px, 5.5vw, 48px);
+    line-height: 1.15; font-weight: 700;
+    letter-spacing: -0.01em; color: var(--ink);
+  }
+  h1 .accent { color: var(--accent-1); }
+  .tagline {
+    font-size: clamp(17px, 2.2vw, 19px);
+    color: var(--ink-soft); max-width: 660px; margin: 0 auto;
+  }
+  .cta {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    justify-content: center; margin-top: 28px;
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 22px; border-radius: 999px;
+    font-weight: 600; font-size: 15px;
+    text-decoration: none; transition: transform .12s ease, box-shadow .12s ease;
+    box-shadow: var(--shadow);
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.primary { background: var(--accent-1); color: white; }
+  .btn.ghost { background: var(--card); color: var(--ink); border: 1px solid var(--card-edge); }
+
+  .card {
+    background: var(--card); backdrop-filter: blur(8px);
+    border: 1px solid var(--card-edge);
+    border-radius: var(--radius);
+    padding: 28px 28px;
+    box-shadow: var(--shadow);
+    margin: 24px 0;
+  }
+  h2 { font-size: 22px; margin: 0 0 14px; letter-spacing: -0.01em; }
+  h2 .num {
+    display: inline-block; width: 28px; height: 28px; border-radius: 50%;
+    background: var(--accent-1); color: white;
+    text-align: center; line-height: 28px; font-size: 14px;
+    margin-right: 10px;
+  }
+  p { margin: 8px 0; color: var(--ink-soft); }
+  ul { margin: 8px 0 12px 22px; color: var(--ink-soft); }
+  li { margin: 4px 0; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13.5px; }
+  code.inline { background: #fff0f1; color: var(--ink); padding: 2px 6px; border-radius: 6px; }
+  pre {
+    background: var(--code-bg); color: var(--code-ink);
+    padding: 18px 20px; border-radius: 12px;
+    overflow-x: auto; line-height: 1.6;
+    box-shadow: inset 0 0 0 1px #ffffff10;
+  }
+  pre .comment { color: #8b93a8; }
+  pre .accent  { color: #fbcfe8; }
+  pre .str     { color: #fcd34d; }
+
+  .gallery {
+    display: grid; grid-template-columns: 1fr; gap: 18px; margin-top: 8px;
+  }
+  .shot {
+    border-radius: 14px; overflow: hidden;
+    border: 1px solid var(--card-edge); background: white;
+    box-shadow: var(--shadow);
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot .caption {
+    padding: 12px 16px; font-size: 13.5px; color: var(--muted);
+    border-top: 1px solid var(--card-edge); background: #fffafb;
+  }
+
+  .features {
+    display: grid; grid-template-columns: 1fr; gap: 14px;
+  }
+  @media (min-width: 720px) { .features { grid-template-columns: 1fr 1fr; } }
+  .feature {
+    padding: 18px 20px; border-radius: 14px;
+    background: white; border: 1px solid var(--card-edge);
+  }
+  .feature h3 {
+    margin: 0 0 6px; font-size: 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .feature h3 .ico {
+    width: 28px; height: 28px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 15px;
+  }
+  .ico.a1 { background: #ffe4e6; color: #be123c; }
+  .ico.a2 { background: #e0e7ff; color: #4f46e5; }
+  .ico.a3 { background: #d1fae5; color: #047857; }
+  .ico.a4 { background: #fef3c7; color: #b45309; }
+  .feature p { margin: 0; font-size: 14.5px; }
+
+  .disclaimer {
+    background: #fff8f0;
+    border: 1px dashed #f4c87a;
+    color: #6b4920;
+  }
+  .disclaimer h2 .num { background: #f59e0b; }
+  .disclaimer code.inline { background: #fef3c7; }
+
+  footer {
+    margin-top: 56px; text-align: center;
+    color: var(--muted); font-size: 14px;
+  }
+  footer a { color: var(--ink-soft); }
+
+  .lang-switch {
+    position: absolute;
+    top: 20px; right: 24px;
+    display: inline-flex; gap: 4px;
+    padding: 4px;
+    background: var(--card); border: 1px solid var(--card-edge);
+    border-radius: 999px;
+    box-shadow: var(--shadow);
+    font-size: 13px;
+  }
+  .lang-switch a, .lang-switch span {
+    padding: 5px 14px; border-radius: 999px;
+    text-decoration: none; color: var(--ink-soft);
+    transition: background .12s ease;
+  }
+  .lang-switch a:hover { background: #fff0f1; }
+  .lang-switch .active { background: var(--accent-1); color: white; }
+</style>
+</head>
+<body>
+
+<div class="wrap" style="position: relative;">
+
+  <nav class="lang-switch" aria-label="語言切換">
+    <a href="index.html">EN</a>
+    <span class="active">繁中</span>
+  </nav>
+
+  <header>
+    <span class="badge"><span class="dot"></span>FastAPI 服務 · 個人 / 開發測試用 · MIT</span>
+    <h1>一個 ChatGPT 訂閱，<br><span class="accent">一個自架圖片 API</span></h1>
+    <p class="tagline">
+      把 Codex CLI 內建的 <code class="inline">$imagegen</code> 包成簡單的 FastAPI 服務。
+      在後台幫每個內部腳本、CI 工作、Side Project 各發一把 bearer key，
+      它們就能共用一份 ChatGPT 訂閱的產圖額度，不用各自燒 OpenAI Images API credits。
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/yazelin/codex-image-service">看 GitHub →</a>
+      <a class="btn ghost" href="#install">安裝</a>
+    </div>
+  </header>
+
+  <section class="card">
+    <h2><span class="num">1</span>為什麼需要它</h2>
+    <p>
+      你已經付了 ChatGPT 訂閱費。Codex CLI 也已經裝在你 homelab 那台機器上、
+      <code class="inline">codex login</code> 過了。但每一個想產圖的內部腳本、CI workflow、
+      Discord/Telegram bot 要不就要 ssh 進你的機器跑
+      <code class="inline">codex exec</code>、要不就得另外花 OpenAI Images API 的錢。
+    </p>
+    <p>
+      這個服務提供第三條路：把 <code class="inline">$imagegen</code> 包成一條
+      <code class="inline">Authorization: Bearer cimg_*</code> 的小 HTTP API，
+      搭配一個 admin 後台讓你可以隨時發 key、停 key、刪 key。
+      一個 ChatGPT 帳號、多個 caller、不必多花一塊錢。
+    </p>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">2</span>它會產出什麼</h2>
+    <div class="gallery">
+      <div class="shot">
+        <img src="examples/banner.webp" alt="示範圖：等距視角的小型 home-server 機架，螢幕正在印一張抽象圖" loading="lazy">
+        <div class="caption">
+          這張 1536×1024 就是用這個服務自己產出來的範例。Prompt：<em>「a clean
+          isometric illustration of a small home-server rack with one glowing
+          screen showing an abstract image being printed, soft pastel palette,
+          warm orange and dusty blue, gentle volumetric morning light,
+          friendly cozy mood, no text, no watermark.」</em> Quality：<code class="inline">medium</code>。
+        </div>
+      </div>
+    </div>
+    <p style="margin-top: 16px;">
+      背後跑的是 <code class="inline">gpt-image-2</code>，也就是 Codex CLI 內建
+      <code class="inline">image_gen</code> 工具的模型。這個服務 <em>不</em> 對輸出做二次處理或過濾，
+      <code class="inline">$imagegen</code> 產出什麼就回傳什麼，並把這次產圖的歷史記到 SQLite。
+    </p>
+  </section>
+
+  <section class="card" id="install">
+    <h2><span class="num">3</span>安裝</h2>
+    <p>
+      前置：在要跑容器的那台主機上已經裝好 <a href="https://github.com/openai/codex">Codex CLI</a>
+      並 <code class="inline">codex login</code> 過。Docker 與 Docker Compose 也要有。
+    </p>
+<pre><span class="comment"># 取得程式碼</span>
+<span class="accent">git clone</span> https://github.com/yazelin/codex-image-service
+<span class="accent">cd</span> codex-image-service
+
+<span class="comment"># 設定</span>
+<span class="accent">cp</span> .env.example .env
+<span class="comment"># 編輯 .env：設好 ADMIN_PASSWORD、ADMIN_SESSION_SECRET、PUBLIC_BASE_URL</span>
+
+<span class="comment"># 啟動</span>
+<span class="accent">docker compose</span> up -d --build</pre>
+    <p>
+      容器在 Docker network <code class="inline">nginx_bridge_network</code> 上監聽 8000 port。
+      用你既有的 nginx 反代，把
+      <code class="inline">deploy/nginx.codex-image-service.location.conf.example</code>
+      的片段貼進你的 nginx 設定即可。
+    </p>
+    <p>初次健康檢查：</p>
+<pre><span class="accent">curl</span> -sf https://YOUR-DOMAIN/codex-image/health
+<span class="comment"># {"status":"ok"}</span></pre>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">4</span>怎麼用</h2>
+    <p>
+      到 <code class="inline">/codex-image/admin</code> 登入，按 <strong>Create API Key</strong>，
+      把跳出來的 <code class="inline">cimg_*</code>（只顯示一次）複製起來，然後就可以打 API：
+    </p>
+<pre><span class="comment"># shell / GitHub Actions</span>
+<span class="accent">curl</span> -sS --fail --max-time 650 \
+  -X POST https://YOUR-DOMAIN/codex-image/v1/images/generate \
+  -H <span class="str">"Authorization: Bearer $CODEX_IMAGE_KEY"</span> \
+  -H <span class="str">"Content-Type: application/json"</span> \
+  -d <span class="str">'{"prompt":"...","size":"1024x1024","quality":"medium","count":1}'</span></pre>
+<pre><span class="comment"># python (httpx)</span>
+<span class="accent">import</span> httpx, os
+r = httpx.post(
+    <span class="str">"https://YOUR-DOMAIN/codex-image/v1/images/generate"</span>,
+    headers={<span class="str">"Authorization"</span>: f<span class="str">"Bearer {os.environ['CODEX_IMAGE_KEY']}"</span>},
+    json={<span class="str">"prompt"</span>: <span class="str">"..."</span>, <span class="str">"size"</span>: <span class="str">"1024x1024"</span>, <span class="str">"quality"</span>: <span class="str">"medium"</span>, <span class="str">"count"</span>: 1},
+    timeout=httpx.Timeout(connect=10, read=600, write=30, pool=10),
+)
+images = r.json()[<span class="str">"images"</span>]   <span class="comment"># [{"url": "...", "expires_at": "..."}]</span></pre>
+    <p>回傳格式：</p>
+<pre>{
+  <span class="str">"id"</span>: <span class="str">"img_3f81..."</span>,
+  <span class="str">"status"</span>: <span class="str">"succeeded"</span>,
+  <span class="str">"images"</span>: [{<span class="str">"url"</span>: <span class="str">"https://YOUR-DOMAIN/codex-image/generated/img_3f81....png"</span>,
+              <span class="str">"expires_at"</span>: <span class="str">"..."</span>}],
+  <span class="str">"created_at"</span>: <span class="str">"..."</span>
+}</pre>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">5</span>後台有什麼</h2>
+    <div class="features">
+      <div class="feature">
+        <h3><span class="ico a1">⌘</span>發 key / 停 key / 刪 key</h3>
+        <p>名稱進 <code class="inline">api_keys</code> 表，token 只存 sha256 hash，原始字串只在建立時顯示一次。</p>
+      </div>
+      <div class="feature">
+        <h3><span class="ico a2">▶</span>後台測試產圖</h3>
+        <p>挑一把 key + 打 prompt + 選 size/quality，從後台直接丟一個 job 進去驗證 key 能用，不用開終端機。</p>
+      </div>
+      <div class="feature">
+        <h3><span class="ico a3">⏳</span>自動過期清掉</h3>
+        <p>每張圖都帶 <code class="inline">expires_at</code>（預設 <code class="inline">IMAGE_RETENTION_DAYS=7</code>），背景排程定期清 PNG 與工作目錄。</p>
+      </div>
+      <div class="feature">
+        <h3><span class="ico a4">🗑</span>手動逐張刪</h3>
+        <p>Image Requests 表每一列有 Delete，立刻清檔案、工作目錄、DB row，不必等到自動過期。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="card disclaimer">
+    <h2><span class="num">!</span>免責聲明 — 個人 / 實驗性質專用</h2>
+    <p>
+      這個專案是為了我們自己 homelab 的開發與測試而寫的。
+      <strong>與 OpenAI 沒有任何附屬關係，也不在他們的支援範圍內</strong>。
+      它只是包了官方 <code class="inline">@openai/codex</code> CLI、把其中的
+      <code class="inline">$imagegen</code> skill 重新導出成 HTTP API；
+      每一次呼叫都消耗你掛進容器的那一個 ChatGPT 帳號
+      （<code class="inline">~/.codex/auth.json</code>）的額度。
+    </p>
+    <p>
+      要 fork 或自行架設請先看清楚以下事項：
+    </p>
+    <ul>
+      <li>把一個 ChatGPT 帳號拿來給多個 caller 共用，這並不是 OpenAI 官方文件提到的標準用法。請確認你的帳號條款允許這樣使用；ToS 合規、計費、濫用處理都是你自己的責任。</li>
+      <li>Codex CLI 升版可能會動到 <code class="inline">$imagegen</code> skill、背後的模型（目前 <code class="inline">gpt-image-2</code>）、sandbox flag 或檔案配置。這個服務有時要跟著改才會繼續正常。</li>
+      <li>沒有任何 SLA、保固或量產等級的安全強化。Admin 就是單一密碼 + HMAC cookie；API key 只存 sha256 hash；目前沒有 per-key 流量限制、配額、稽核 log 或啟用 / 停用 / 刪除以外的 scope。</li>
+      <li>如果你打算 fork 來放別的地方用，請先讀 <code class="inline">app/services/codex_image.py</code> — 它對 Codex 下的是 <code class="inline">--dangerously-bypass-approvals-and-sandbox</code>，因為 bubblewrap 在 Docker 裡跑不起來，請在指向任何重要系統前重新評估威脅模型。</li>
+    </ul>
+  </section>
+
+  <footer>
+    <p>MIT 授權 · <a href="https://github.com/yazelin/codex-image-service">github.com/yazelin/codex-image-service</a></p>
+    <p>由 <a href="https://github.com/yazelin">@yazelin</a> 與 Claude Code 共同打造。</p>
+  </footer>
+
+</div>
+
+</body>
+</html>
