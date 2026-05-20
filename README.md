@@ -52,26 +52,61 @@ into the host or burning separate OpenAI Images API credits.
 3. A reverse proxy in front of the container (e.g. nginx) terminating HTTPS
    for the domain you want to expose.
 
-## Quickstart
+## Quickstart — local testing (no nginx)
+
+The fastest way to kick the tires. Maps port 8000 directly to your host;
+no reverse proxy required.
 
 ```bash
 git clone https://github.com/yazelin/codex-image-service
 cd codex-image-service
 
 cp .env.example .env
-# Edit .env — at minimum set:
+# Set at minimum:
 #   ADMIN_PASSWORD          long random string
 #   ADMIN_SESSION_SECRET    long random string
-#   PUBLIC_BASE_URL         e.g. https://images.example.com/codex-image
-#   ADMIN_URL_PREFIX        e.g. /codex-image  (only if served at a sub-path)
+# Leave PUBLIC_BASE_URL and ADMIN_URL_PREFIX at their defaults.
+
+docker compose -f docker-compose.local.yml up -d --build
+```
+
+Then:
+
+```bash
+curl -sf http://localhost:8000/health     # {"status":"ok"}
+open http://localhost:8000/admin           # log in, create a key
+```
+
+Skip Docker entirely (fastest dev loop):
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # edit as above
+uvicorn app.main:app --reload --port 8000
+```
+
+This uses the host's own `~/.codex/auth.json` directly, no bind-mount.
+
+## Production — behind your existing nginx
+
+For a multi-caller deployment you probably want a reverse proxy terminating
+TLS and serving the service at a path on an existing domain.
+
+```bash
+cp .env.example .env
+# Set at minimum:
+#   ADMIN_PASSWORD, ADMIN_SESSION_SECRET     long random strings
+#   PUBLIC_BASE_URL                          https://images.example.com/codex-image
+#   ADMIN_URL_PREFIX                         /codex-image
 
 docker compose up -d --build
 ```
 
-The container exposes port 8000 on the Docker network
-`nginx_bridge_network`. Front it with your nginx using the snippet at
-`deploy/nginx.codex-image-service.location.conf.example`. Then reload nginx
-and verify:
+The default `docker-compose.yml` attaches the container to a pre-existing
+Docker network called `nginx_bridge_network`. Front it with your nginx using
+the snippet at `deploy/nginx.codex-image-service.location.conf.example`,
+then reload nginx and verify:
 
 ```bash
 curl -sf https://images.example.com/codex-image/health

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import html
-import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,10 @@ from app.services.job_queue import GenerationQueueUnavailable
 
 router = APIRouter()
 
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
 
 def _prefix(request: Request) -> str:
     return request.app.state.settings.admin_url_prefix or ""
@@ -43,6 +47,10 @@ def _redirect_login(request: Request) -> RedirectResponse:
     return RedirectResponse(_url(request, "/admin/login"), status_code=303)
 
 
+# ---------------------------------------------------------------------------
+# auth routes
+# ---------------------------------------------------------------------------
+
 @router.get("/", include_in_schema=False)
 async def root(request: Request) -> RedirectResponse:
     return RedirectResponse(_url(request, "/admin"), status_code=303)
@@ -52,7 +60,7 @@ async def root(request: Request) -> RedirectResponse:
 async def login_page(request: Request):
     if _admin_user(request):
         return RedirectResponse(_url(request, "/admin"), status_code=303)
-    return HTMLResponse(_layout("Admin Login", _login_form(_prefix(request))))
+    return HTMLResponse(_login_layout(_login_form(_prefix(request))))
 
 
 @router.post("/admin/login", include_in_schema=False)
@@ -66,9 +74,8 @@ async def login(request: Request):
         and constant_equals(password, settings.admin_password)
     ):
         return HTMLResponse(
-            _layout(
-                "Admin Login",
-                _login_form(_prefix(request), error="Invalid username or password"),
+            _login_layout(
+                _login_form(_prefix(request), error="Invalid username or password")
             ),
             status_code=401,
         )
@@ -91,13 +98,41 @@ async def logout(request: Request) -> RedirectResponse:
     return response
 
 
+# ---------------------------------------------------------------------------
+# page routes (GET)
+# ---------------------------------------------------------------------------
+
 @router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
-async def dashboard(request: Request):
+async def overview(request: Request):
     if not _admin_user(request):
         return _redirect_login(request)
-    settings = request.app.state.settings
-    return HTMLResponse(_dashboard(settings, _prefix(request)))
+    return HTMLResponse(_overview_page(request.app.state.settings, _prefix(request)))
 
+
+@router.get("/admin/keys", response_class=HTMLResponse, include_in_schema=False)
+async def keys_page(request: Request):
+    if not _admin_user(request):
+        return _redirect_login(request)
+    return HTMLResponse(_keys_page(request.app.state.settings, _prefix(request)))
+
+
+@router.get("/admin/test", response_class=HTMLResponse, include_in_schema=False)
+async def test_page(request: Request):
+    if not _admin_user(request):
+        return _redirect_login(request)
+    return HTMLResponse(_test_page(request.app.state.settings, _prefix(request)))
+
+
+@router.get("/admin/requests", response_class=HTMLResponse, include_in_schema=False)
+async def requests_page(request: Request):
+    if not _admin_user(request):
+        return _redirect_login(request)
+    return HTMLResponse(_requests_page(request.app.state.settings, _prefix(request)))
+
+
+# ---------------------------------------------------------------------------
+# mutation routes (POST)
+# ---------------------------------------------------------------------------
 
 @router.post("/admin/api-keys", response_class=HTMLResponse, include_in_schema=False)
 async def create_api_key(request: Request):
@@ -107,7 +142,7 @@ async def create_api_key(request: Request):
     form = await request.form()
     name = str(form.get("name", ""))
     _, raw_key = db.create_api_key(settings, name)
-    return HTMLResponse(_dashboard(settings, _prefix(request), new_api_key=raw_key))
+    return HTMLResponse(_keys_page(settings, _prefix(request), new_api_key=raw_key))
 
 
 @router.post("/admin/api-keys/{key_id}/disable", include_in_schema=False)
@@ -115,7 +150,7 @@ async def disable_api_key(request: Request, key_id: str) -> RedirectResponse:
     if not _admin_user(request):
         return _redirect_login(request)
     db.disable_api_key(request.app.state.settings, key_id)
-    return RedirectResponse(_url(request, "/admin"), status_code=303)
+    return RedirectResponse(_url(request, "/admin/keys"), status_code=303)
 
 
 @router.post("/admin/api-keys/{key_id}/delete", include_in_schema=False)
@@ -123,7 +158,7 @@ async def delete_api_key(request: Request, key_id: str) -> RedirectResponse:
     if not _admin_user(request):
         return _redirect_login(request)
     db.delete_api_key(request.app.state.settings, key_id)
-    return RedirectResponse(_url(request, "/admin"), status_code=303)
+    return RedirectResponse(_url(request, "/admin/keys"), status_code=303)
 
 
 @router.post("/admin/image-requests/{request_id}/delete", include_in_schema=False)
@@ -143,7 +178,7 @@ async def delete_image_request(request: Request, request_id: str) -> RedirectRes
             if workdir_path.is_dir():
                 shutil.rmtree(workdir_path, ignore_errors=True)
         db.delete_image_request(settings, request_id)
-    return RedirectResponse(_url(request, "/admin"), status_code=303)
+    return RedirectResponse(_url(request, "/admin/requests"), status_code=303)
 
 
 @router.post("/admin/test-generate", response_class=HTMLResponse, include_in_schema=False)
@@ -185,13 +220,11 @@ async def admin_test_generate(request: Request):
                 notice = (
                     f"Queued <code>{html.escape(request_id)}</code> with key "
                     f"<strong>{html.escape(keys[api_key_id]['name'])}</strong>. "
-                    "Refresh in 1-3 minutes to see the result below."
+                    "Open History in 1-3 minutes to see the result."
                 )
             except GenerationQueueUnavailable as exc:
                 error = str(exc)
-    return HTMLResponse(
-        _dashboard(settings, _prefix(request), test_notice=notice, test_error=error)
-    )
+    return HTMLResponse(_test_page(settings, _prefix(request), notice=notice, error=error))
 
 
 @router.post("/admin/cleanup", response_class=HTMLResponse, include_in_schema=False)
@@ -200,101 +233,206 @@ async def cleanup(request: Request):
         return _redirect_login(request)
     result = await request.app.state.cleanup.run_once()
     return HTMLResponse(
-        _dashboard(request.app.state.settings, _prefix(request), cleanup_result=result)
+        _requests_page(request.app.state.settings, _prefix(request), cleanup_result=result)
     )
 
 
-def _dashboard(
+# ---------------------------------------------------------------------------
+# page renderers
+# ---------------------------------------------------------------------------
+
+def _overview_page(settings: Any, prefix: str) -> str:
+    stats = db.dashboard_stats(settings)
+    recent = db.list_image_requests(settings, limit=10)
+    body = f"""
+      <div class="page-head">
+        <h2>Overview</h2>
+        <p class="page-sub">A snapshot of keys, queue depth, and recent jobs.</p>
+      </div>
+      <section class="stats">
+        <div><strong>{stats['api_key_count']}</strong><span>Total keys</span></div>
+        <div><strong>{stats['active_key_count']}</strong><span>Active keys</span></div>
+        <div><strong>{stats['request_count']}</strong><span>Requests</span></div>
+        <div><strong>{stats['queued_count']}</strong><span>Queued / running</span></div>
+      </section>
+      <section>
+        <div class="section-title">
+          <h2>Recent activity</h2>
+          <a class="link" href="{prefix}/admin/requests">View all →</a>
+        </div>
+        {_activity_feed(recent, prefix)}
+      </section>
+    """
+    return _shell("Overview", "overview", prefix, body)
+
+
+def _keys_page(settings: Any, prefix: str, new_api_key: str | None = None) -> str:
+    keys = db.list_api_keys(settings)
+    notice = ""
+    if new_api_key:
+        notice = (
+            "<div class='notice notice-prominent'>"
+            "<strong>New API key created.</strong> Copy it now — it will not be shown again."
+            "<div class='key-reveal-row'>"
+            f"<code class='key-reveal' id='new-key-value'>{html.escape(new_api_key)}</code>"
+            "<button class='copy-btn' type='button' data-copy-target='new-key-value'>Copy</button>"
+            "</div>"
+            "</div>"
+        )
+    body = f"""
+      <div class="page-head">
+        <h2>API Keys</h2>
+        <p class="page-sub">Issue bearer keys for each caller. Tokens are hashed; the raw value is shown once.</p>
+      </div>
+      {notice}
+      <section>
+        <h2>Create a new key</h2>
+        <form class="inline" method="post" action="{prefix}/admin/api-keys">
+          <input name="name" placeholder="Caller / project name (e.g. catime-gh-actions)" required>
+          <button type="submit">Create key</button>
+        </form>
+      </section>
+      <section>
+        <h2>All keys</h2>
+        {_api_keys_table(keys, prefix)}
+      </section>
+    """
+    return _shell("API Keys", "keys", prefix, body)
+
+
+def _test_page(
     settings: Any,
     prefix: str,
-    new_api_key: str | None = None,
-    cleanup_result: Any | None = None,
-    test_notice: str | None = None,
-    test_error: str | None = None,
+    notice: str | None = None,
+    error: str | None = None,
 ) -> str:
     keys = db.list_api_keys(settings)
-    requests = db.list_image_requests(settings, limit=100)
-    stats = db.dashboard_stats(settings)
+    notice_html = f"<div class='notice'>{notice}</div>" if notice else ""
+    error_html = f"<div class='error'>{html.escape(error)}</div>" if error else ""
+    body = f"""
+      <div class="page-head">
+        <h2>Test image generation</h2>
+        <p class="page-sub">Queue a real generation against any enabled key — tracked under that key's usage stats.</p>
+      </div>
+      {notice_html}
+      {error_html}
+      <section>
+        {_test_generate_form(keys, prefix)}
+      </section>
+    """
+    return _shell("Test image", "test", prefix, body)
 
-    notices = []
-    if new_api_key:
-        notices.append(
-            "<div class='notice'><strong>New API key:</strong> "
-            f"<code>{html.escape(new_api_key)}</code><br>"
-            "Copy it now. It will not be shown again.</div>"
-        )
+
+def _requests_page(
+    settings: Any,
+    prefix: str,
+    cleanup_result: Any | None = None,
+) -> str:
+    requests = db.list_image_requests(settings, limit=200)
+    cleanup_html = ""
     if cleanup_result:
         errors = cleanup_result.errors or []
-        notice = (
-            f"Cleanup complete: expired requests={cleanup_result.expired_requests}, "
-            f"deleted files={cleanup_result.deleted_files}, "
-            f"deleted workdirs={cleanup_result.deleted_workdirs}."
+        message = (
+            f"Cleanup complete — expired requests: {cleanup_result.expired_requests}, "
+            f"deleted files: {cleanup_result.deleted_files}, "
+            f"deleted workdirs: {cleanup_result.deleted_workdirs}."
         )
         if errors:
-            notice += " Errors: " + html.escape("; ".join(errors))
-        notices.append(f"<div class='notice'>{notice}</div>")
-    if test_notice:
-        notices.append(f"<div class='notice'>{test_notice}</div>")
-    if test_error:
-        notices.append(f"<div class='error'>{html.escape(test_error)}</div>")
-
+            message += " Errors: " + html.escape("; ".join(errors))
+        cleanup_html = f"<div class='notice'>{message}</div>"
     body = f"""
-    <div class="topbar">
-      <h1>Codex Image Service</h1>
-      <form method="post" action="{prefix}/admin/logout"><button type="submit">Logout</button></form>
-    </div>
-    {''.join(notices)}
-    <section class="stats">
-      <div><strong>{stats['api_key_count']}</strong><span>Total keys</span></div>
-      <div><strong>{stats['active_key_count']}</strong><span>Active keys</span></div>
-      <div><strong>{stats['request_count']}</strong><span>Requests</span></div>
-      <div><strong>{stats['queued_count']}</strong><span>Queued/running</span></div>
-    </section>
-    <section>
-      <h2>Create API Key</h2>
-      <form class="inline" method="post" action="{prefix}/admin/api-keys">
-        <input name="name" placeholder="Customer or project name" required>
-        <button type="submit">Create key</button>
-      </form>
-    </section>
-    <section>
-      <h2>API Keys</h2>
-      {_api_keys_table(keys, prefix)}
-    </section>
-    <section>
-      <h2>Test image generation</h2>
-      <p style="color:#5f6877;margin:0 0 12px">Picks an existing key and runs one job through the queue.
-      Tracked under that key's usage stats. Generation takes 1-3 minutes — refresh the page to see status.</p>
-      {_test_generate_form(keys, prefix)}
-    </section>
-    <section>
-      <div class="section-title">
-        <h2>Image Requests</h2>
-        <form method="post" action="{prefix}/admin/cleanup"><button type="submit">Run cleanup</button></form>
+      <div class="page-head">
+        <h2>History</h2>
+        <p class="page-sub">Every generation request, with status, prompt, and (if failed) Codex stderr.</p>
       </div>
-      {_requests_table(requests, settings)}
-    </section>
+      {cleanup_html}
+      <section>
+        <div class="section-title">
+          <h2>Image requests</h2>
+          <form method="post" action="{prefix}/admin/cleanup"><button class="ghost" type="submit">Run cleanup</button></form>
+        </div>
+        {_requests_table(requests, settings)}
+      </section>
     """
-    return _layout("Codex Image Service", body)
+    return _shell("History", "requests", prefix, body)
+
+
+# ---------------------------------------------------------------------------
+# component helpers
+# ---------------------------------------------------------------------------
+
+def _status_chip(status: str) -> str:
+    cls = {
+        "succeeded": "chip chip-ok",
+        "running":   "chip chip-run",
+        "queued":    "chip chip-queue",
+        "failed":    "chip chip-fail",
+        "expired":   "chip chip-mute",
+    }.get(status, "chip chip-mute")
+    return f"<span class='{cls}'>{html.escape(status)}</span>"
+
+
+def _relative_time(iso: str | None) -> str:
+    if not iso:
+        return ""
+    try:
+        ts = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return html.escape(iso)
+    now = datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    delta = (now - ts).total_seconds()
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h ago"
+    return f"{int(delta // 86400)}d ago"
+
+
+def _activity_feed(requests: list[dict[str, Any]], prefix: str) -> str:
+    if not requests:
+        return "<p class='muted'>No requests yet. Generate one via <a href='" + prefix + "/admin/test'>Test image</a>.</p>"
+    items = []
+    for item in requests:
+        when = _relative_time(item.get("created_at"))
+        key_name = html.escape(item.get("api_key_name") or "—")
+        prompt_short = (item.get("prompt") or "")
+        if len(prompt_short) > 80:
+            prompt_short = prompt_short[:77] + "..."
+        items.append(
+            "<li class='activity-item'>"
+            f"<div class='activity-row'>{_status_chip(item['status'])}"
+            f"<code class='activity-id'>{html.escape(item['id'])}</code>"
+            f"<span class='activity-time'>{when}</span></div>"
+            f"<div class='activity-meta'>key: {key_name} · {html.escape(prompt_short)}</div>"
+            "</li>"
+        )
+    return "<ul class='activity'>" + "".join(items) + "</ul>"
 
 
 def _test_generate_form(keys: list[dict[str, Any]], prefix: str) -> str:
     enabled_keys = [k for k in keys if k["enabled"]]
     if not enabled_keys:
-        return "<p><em>Create an enabled API key first.</em></p>"
+        return (
+            "<p class='muted'>No enabled keys yet. "
+            f"<a href='{prefix}/admin/keys'>Create one →</a></p>"
+        )
     options = "".join(
         f"<option value='{html.escape(k['id'])}'>{html.escape(k['name'])} ({html.escape(k['id'])})</option>"
         for k in enabled_keys
     )
     return f"""
-      <form method="post" action="{prefix}/admin/test-generate" style="display:grid;gap:10px;max-width:640px">
+      <form method="post" action="{prefix}/admin/test-generate" class="form-grid">
         <label>API key
           <select name="api_key_id" required>{options}</select>
         </label>
         <label>Prompt
           <textarea name="prompt" rows="3" required placeholder="A minimalist orange tabby cat clock face on white"></textarea>
         </label>
-        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px">
+        <div class="form-row-3">
           <label>Size
             <select name="size">
               <option>1024x1024</option>
@@ -314,7 +452,9 @@ def _test_generate_form(keys: list[dict[str, Any]], prefix: str) -> str:
             <input name="count" type="number" min="1" max="4" value="1">
           </label>
         </div>
-        <button type="submit" style="justify-self:start">Queue test job</button>
+        <div>
+          <button type="submit">Queue test job</button>
+        </div>
       </form>
     """
 
@@ -322,31 +462,41 @@ def _test_generate_form(keys: list[dict[str, Any]], prefix: str) -> str:
 def _api_keys_table(keys: list[dict[str, Any]], prefix: str) -> str:
     rows = []
     for key in keys:
-        enabled = "enabled" if key["enabled"] else "disabled"
+        enabled = (
+            "<span class='chip chip-ok'>enabled</span>"
+            if key["enabled"]
+            else "<span class='chip chip-mute'>disabled</span>"
+        )
         action_forms = []
         if key["enabled"]:
             action_forms.append(
                 f"<form method='post' action='{prefix}/admin/api-keys/{html.escape(key['id'])}/disable' style='display:inline'>"
-                "<button type='submit'>Disable</button></form>"
+                "<button class='ghost' type='submit'>Disable</button></form>"
             )
         action_forms.append(
             f"<form method='post' action='{prefix}/admin/api-keys/{html.escape(key['id'])}/delete' style='display:inline;margin-left:6px'"
             " onsubmit=\"return confirm('Delete this API key permanently? History rows stay but the key can no longer authenticate.');\">"
-            "<button type='submit' style='background:#c0392b;border-color:#c0392b'>Delete</button></form>"
+            "<button class='danger' type='submit'>Delete</button></form>"
         )
         action = "".join(action_forms)
+        key_id_esc = html.escape(key['id'])
         rows.append(
             "<tr>"
-            f"<td><code>{html.escape(key['id'])}</code></td>"
+            f"<td><span class='id-cell'><code>{key_id_esc}</code>"
+            f"<button class='copy-btn copy-btn-mini' type='button' data-copy-value='{key_id_esc}' title='Copy key ID'>⧉</button>"
+            "</span></td>"
             f"<td>{html.escape(key['name'])}</td>"
             f"<td>{enabled}</td>"
             f"<td>{html.escape(str(key['requests_count']))}</td>"
-            f"<td>{html.escape(str(key['last_used_at'] or ''))}</td>"
-            f"<td>{action}</td>"
+            f"<td>{_relative_time(key['last_used_at']) or '—'}</td>"
+            f"<td class='actions'>{action}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='6'>No API keys yet.</td></tr>")
+        rows.append(
+            "<tr><td colspan='6' class='empty'>"
+            "No API keys yet. Use the form above to create your first one.</td></tr>"
+        )
     return (
         "<table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Requests</th>"
         "<th>Last used</th><th>Action</th></tr></thead><tbody>"
@@ -372,27 +522,27 @@ def _requests_table(requests: list[dict[str, Any]], settings: Any) -> str:
             f"<form method='post' action='{prefix}/admin/image-requests/"
             f"{html.escape(item['id'])}/delete' style='display:inline'"
             " onsubmit=\"return confirm('Delete this image, workdir, and history row?');\">"
-            "<button type='submit' style='background:#c0392b;border-color:#c0392b'>Delete</button>"
+            "<button class='danger' type='submit'>Delete</button>"
             "</form>"
         )
         rows.append(
             "<tr>"
             f"<td><code>{html.escape(item['id'])}</code></td>"
-            f"<td>{html.escape(item['status'])}</td>"
-            f"<td>{html.escape(item.get('api_key_name') or '')}</td>"
-            f"<td>{html.escape(item['created_at'])}</td>"
-            f"<td>{html.escape(item['expires_at'])}</td>"
-            f"<td>{', '.join(links)}</td>"
+            f"<td>{_status_chip(item['status'])}</td>"
+            f"<td>{html.escape(item.get('api_key_name') or '—')}</td>"
+            f"<td>{_relative_time(item['created_at'])}</td>"
+            f"<td>{_relative_time(item['expires_at'])}</td>"
+            f"<td>{', '.join(links) or '—'}</td>"
             f"<td><details><summary>Prompt</summary><pre>{html.escape(item['prompt'])}</pre></details></td>"
-            f"<td><details><summary>Error</summary><pre>{html.escape(error)}</pre></details></td>"
+            f"<td><details><summary>Error</summary><pre>{html.escape(error) or '—'}</pre></details></td>"
             f"<td>{delete_form}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='9'>No image requests yet.</td></tr>")
+        rows.append("<tr><td colspan='9' class='empty'>No image requests yet.</td></tr>")
     return (
         "<table><thead><tr><th>ID</th><th>Status</th><th>Key</th><th>Created</th>"
-        "<th title='Auto-deleted after this time by the scheduled cleanup'>Expires (auto-delete)</th>"
+        "<th title='Auto-deleted after this time by the scheduled cleanup'>Expires</th>"
         "<th>Images</th><th>Prompt</th><th>Error</th><th>Action</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
@@ -403,55 +553,522 @@ def _login_form(prefix: str, error: str | None = None) -> str:
     error_html = f"<div class='error'>{html.escape(error)}</div>" if error else ""
     return f"""
     <div class="login">
-      <h1>Admin Login</h1>
+      <div class="login-brand">
+        <span class="brand-mark brand-mark-lg">✽</span>
+        <div class="login-brand-text">
+          <div class="login-brand-name">Codex Image Service</div>
+          <div class="login-brand-sub">Admin sign-in</div>
+        </div>
+      </div>
       {error_html}
       <form method="post" action="{prefix}/admin/login">
         <label>Username<input name="username" autocomplete="username" required></label>
         <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-        <button type="submit">Login</button>
+        <button type="submit" style="width: 100%">Sign in</button>
       </form>
     </div>
     """
 
 
-def _layout(title: str, body: str) -> str:
+# ---------------------------------------------------------------------------
+# layouts (shell with sidebar; minimal login shell)
+# ---------------------------------------------------------------------------
+
+NAV_ITEMS = [
+    ("overview", "Overview",   "⌂", "/admin"),
+    ("keys",     "API Keys",   "⌘", "/admin/keys"),
+    ("test",     "Test image", "▸", "/admin/test"),
+    ("requests", "History",    "☰", "/admin/requests"),
+]
+
+
+def _sidebar(current_nav: str, prefix: str) -> str:
+    items = []
+    for slug, label, ico, path in NAV_ITEMS:
+        active = " active" if slug == current_nav else ""
+        items.append(
+            f"<a class='nav-item{active}' href='{prefix}{path}'>"
+            f"<span class='nav-ico'>{ico}</span><span>{label}</span>"
+            "</a>"
+        )
+    return (
+        "<aside class='sidebar'>"
+        f"<nav class='nav'>{''.join(items)}</nav>"
+        "</aside>"
+    )
+
+
+def _shell(title: str, current_nav: str, prefix: str, body: str) -> str:
+    return _base_layout(
+        title,
+        f"""
+        <header class='topbar'>
+          <div class='brand'>
+            <span class='brand-mark'>✽</span>
+            <span class='brand-name'>Codex Image Service</span>
+          </div>
+          <div class='topbar-actions'>
+            <span class='user-chip'>admin</span>
+            <form method='post' action='{prefix}/admin/logout'>
+              <button class='ghost' type='submit'>Logout</button>
+            </form>
+          </div>
+        </header>
+        <div class='layout'>
+          {_sidebar(current_nav, prefix)}
+          <main class='content'>{body}</main>
+        </div>
+        """,
+    )
+
+
+def _login_layout(body: str) -> str:
+    return _base_layout("Admin Login", body)
+
+
+def _base_layout(title: str, body: str) -> str:
     return f"""
     <!doctype html>
-    <html lang="en">
+    <html lang="zh-Hant">
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <title>{html.escape(title)}</title>
-      <style>
-        :root {{ color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }}
-        body {{ margin: 0; background: #f6f7f9; color: #16181d; }}
-        h1 {{ font-size: 24px; margin: 0; }}
-        h2 {{ font-size: 18px; margin: 0 0 12px; }}
-        section, .login {{ max-width: 1180px; margin: 20px auto; padding: 20px; background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; }}
-        .topbar {{ max-width: 1180px; margin: 24px auto 0; display: flex; justify-content: space-between; align-items: center; }}
-        .stats {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; background: transparent; border: 0; padding: 0; }}
-        .stats div {{ background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; padding: 16px; }}
-        .stats strong {{ display: block; font-size: 24px; }}
-        .stats span {{ color: #5f6877; }}
-        .section-title {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; }}
-        .inline {{ display: flex; gap: 8px; }}
-        input {{ box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid #c9d0da; border-radius: 6px; font: inherit; }}
-        label {{ display: grid; gap: 6px; margin: 10px 0; }}
-        button {{ padding: 9px 12px; border: 1px solid #1f6feb; border-radius: 6px; background: #1f6feb; color: #fff; font: inherit; cursor: pointer; white-space: nowrap; }}
-        table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-        th, td {{ padding: 10px; border-bottom: 1px solid #e6e9ef; text-align: left; vertical-align: top; }}
-        th {{ color: #5f6877; font-weight: 600; }}
-        code, pre {{ font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
-        pre {{ white-space: pre-wrap; max-width: 420px; }}
-        .notice {{ max-width: 1180px; margin: 16px auto 0; padding: 12px 16px; background: #eef6ff; border: 1px solid #b8d7ff; border-radius: 8px; }}
-        .error {{ padding: 10px 12px; background: #fff0f0; border: 1px solid #ffc6c6; border-radius: 6px; color: #9b1c1c; }}
-        @media (max-width: 760px) {{
-          .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-          .inline, .topbar, .section-title {{ align-items: stretch; flex-direction: column; }}
-          table {{ display: block; overflow-x: auto; }}
-        }}
-      </style>
+      <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23fda4af'/%3E%3Ctext x='50%25' y='58%25' text-anchor='middle' font-size='34' fill='white' font-family='ui-sans-serif,system-ui'%3E%E2%9C%BD%3C/text%3E%3C/svg%3E">
+      <style>{_STYLES}</style>
     </head>
-    <body>{body}</body>
+    <body>{body}
+      <script>{_COPY_SCRIPT}</script>
+    </body>
     </html>
     """
+
+
+_COPY_SCRIPT = """
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.copy-btn');
+  if (!btn) return;
+  let value = btn.getAttribute('data-copy-value');
+  if (!value) {
+    const targetId = btn.getAttribute('data-copy-target');
+    if (targetId) {
+      const el = document.getElementById(targetId);
+      if (el) value = el.textContent.trim();
+    }
+  }
+  if (!value) return;
+  const done = () => {
+    const original = btn.textContent;
+    btn.textContent = btn.classList.contains('copy-btn-mini') ? '✓' : 'Copied ✓';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 1400);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(value).then(done).catch(() => {
+      // fallback below
+      const ta = document.createElement('textarea');
+      ta.value = value; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } finally { document.body.removeChild(ta); }
+    });
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = value; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } finally { document.body.removeChild(ta); }
+  }
+});
+"""
+
+
+_STYLES = """
+  :root {
+    color-scheme: light;
+    --ink: #2d3142;
+    --ink-soft: #4a5072;
+    --muted: #7d839b;
+    --bg-1: #fdf8f3;
+    --bg-2: #fff1f2;
+    --bg-3: #eef2ff;
+    --accent-1: #fda4af;
+    --accent-2: #a5b4fc;
+    --accent-3: #86efac;
+    --accent-4: #fcd34d;
+    --card: #ffffffcc;
+    --card-edge: #f0e3e5;
+    --code-bg: #1e2336;
+    --code-ink: #e9ecf8;
+    --danger: #e11d48;
+    --shadow: 0 6px 30px -8px rgba(120,60,80,.18);
+    --shadow-sm: 0 2px 8px -2px rgba(120,60,80,.10);
+    --radius: 18px;
+    --sidebar-w: 232px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 15px/1.6 "Noto Sans TC", Inter, ui-sans-serif, system-ui, "PingFang TC", "Helvetica Neue", sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(ellipse 1200px 600px at 10% -10%, var(--bg-2) 0%, transparent 60%),
+      radial-gradient(ellipse 1100px 500px at 95% 5%, var(--bg-3) 0%, transparent 55%),
+      var(--bg-1);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin: 0; color: var(--ink); }
+  h2 { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 16px; color: var(--ink); }
+  p { margin: 0 0 12px; color: var(--ink-soft); }
+  p.muted { color: var(--muted); }
+  a { color: var(--accent-1); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a.link { font-size: 13.5px; font-weight: 500; }
+
+  /* ---- topbar ---- */
+  .topbar {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 24px;
+    background: #ffffffd8;
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--card-edge);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-mark {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: var(--accent-1); color: white;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 17px;
+  }
+  .brand-name { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+  .topbar-actions { display: flex; align-items: center; gap: 12px; }
+  .user-chip {
+    padding: 6px 12px; border-radius: 999px;
+    background: #fff0f1; color: var(--ink-soft);
+    font-size: 13px; font-weight: 500;
+  }
+
+  /* ---- layout ---- */
+  .layout {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) 1fr;
+    gap: 0;
+    min-height: calc(100vh - 60px);
+  }
+  .sidebar {
+    border-right: 1px solid var(--card-edge);
+    background: #ffffff9c;
+    backdrop-filter: blur(10px);
+    padding: 20px 14px;
+  }
+  .nav { display: flex; flex-direction: column; gap: 4px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; border-radius: 12px;
+    color: var(--ink-soft);
+    font-size: 14px; font-weight: 500;
+    text-decoration: none;
+    transition: background .12s ease, color .12s ease;
+    border-left: 3px solid transparent;
+  }
+  .nav-item:hover { background: #fff7f8; color: var(--ink); text-decoration: none; }
+  .nav-item.active {
+    background: #ffe9eb;
+    color: var(--ink);
+    border-left-color: var(--accent-1);
+    font-weight: 600;
+  }
+  .nav-ico {
+    width: 22px; height: 22px; border-radius: 7px;
+    background: #fff0f1; color: var(--accent-1);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 13px;
+  }
+  .nav-item.active .nav-ico { background: var(--accent-1); color: white; }
+
+  .content { padding: 32px 36px 64px; max-width: 1180px; }
+  .page-head { margin-bottom: 24px; }
+  .page-head h2 { font-size: 26px; margin: 0 0 6px; }
+  .page-sub { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  /* ---- card sections ---- */
+  section {
+    background: var(--card);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--card-edge);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 24px 26px;
+    margin: 0 0 22px;
+  }
+
+  /* ---- stats ---- */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    background: transparent;
+    border: 0;
+    backdrop-filter: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0 0 22px;
+  }
+  .stats > div {
+    background: white;
+    border: 1px solid var(--card-edge);
+    border-radius: 14px;
+    padding: 18px 20px;
+    box-shadow: var(--shadow-sm);
+  }
+  .stats strong { display: block; font-size: 30px; font-weight: 700; color: var(--ink); line-height: 1.1; }
+  .stats span { color: var(--muted); font-size: 13px; }
+
+  /* ---- section title row ---- */
+  .section-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .section-title h2 { margin: 0; }
+
+  /* ---- inline form (single input + button) ---- */
+  .inline { display: flex; gap: 10px; align-items: stretch; }
+  .inline input { flex: 1; }
+
+  /* ---- multi-field form (test page) ---- */
+  .form-grid { display: grid; gap: 14px; max-width: 720px; }
+  .form-row-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+
+  /* ---- inputs ---- */
+  input, select, textarea {
+    width: 100%;
+    padding: 11px 14px;
+    border: 1px solid var(--card-edge);
+    border-radius: 10px;
+    font: inherit;
+    color: var(--ink);
+    background: white;
+    transition: border-color .12s ease, box-shadow .12s ease;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--accent-1);
+    box-shadow: 0 0 0 3px #fda4af33;
+  }
+  textarea { resize: vertical; min-height: 80px; font-family: inherit; }
+  label {
+    display: grid; gap: 6px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--ink-soft);
+    font-weight: 500;
+  }
+
+  /* ---- buttons ---- */
+  button {
+    padding: 10px 22px;
+    border: 0; border-radius: 999px;
+    background: var(--accent-1); color: white;
+    font: inherit; font-size: 14px; font-weight: 600;
+    cursor: pointer; white-space: nowrap;
+    box-shadow: var(--shadow-sm);
+    transition: transform .12s ease, filter .12s ease;
+  }
+  button:hover { transform: translateY(-1px); }
+  button:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+  button.danger { background: var(--danger); }
+  button.danger:hover { filter: brightness(1.08); }
+  button.ghost {
+    background: white; color: var(--ink-soft);
+    border: 1px solid var(--card-edge); box-shadow: none;
+  }
+  button.ghost:hover { background: #fff8f9; }
+
+  /* ---- table ---- */
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td {
+    padding: 12px 12px;
+    border-bottom: 1px solid #f3e8eb;
+    text-align: left; vertical-align: top;
+  }
+  th {
+    color: var(--muted); font-weight: 600;
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: #fff8f9; }
+  td.actions { white-space: nowrap; }
+  td.empty { text-align: center; color: var(--muted); padding: 32px 12px; }
+
+  /* ---- chips ---- */
+  .chip {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px; font-weight: 600;
+    letter-spacing: .01em;
+  }
+  .chip-ok    { background: #d1fae5; color: #047857; }
+  .chip-run   { background: #dbeafe; color: #1d4ed8; }
+  .chip-queue { background: #fef3c7; color: #b45309; }
+  .chip-fail  { background: #fee2e2; color: #b91c1c; }
+  .chip-mute  { background: #f1f5f9; color: #64748b; }
+
+  /* ---- activity feed ---- */
+  .activity { list-style: none; padding: 0; margin: 0; }
+  .activity-item {
+    padding: 12px 14px;
+    border-bottom: 1px solid #f3e8eb;
+  }
+  .activity-item:last-child { border-bottom: 0; }
+  .activity-row { display: flex; align-items: center; gap: 10px; }
+  .activity-id { font-size: 12.5px; }
+  .activity-time { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+  .activity-meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+  /* ---- code / pre ---- */
+  code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  code {
+    background: #fff0f1; color: var(--ink);
+    padding: 2px 7px; border-radius: 6px;
+    font-size: 12.5px;
+  }
+  pre {
+    white-space: pre-wrap;
+    max-width: 420px;
+    background: #fdf5f6;
+    color: var(--ink);
+    border: 1px solid var(--card-edge);
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 12.5px;
+    margin: 0;
+    line-height: 1.55;
+  }
+  details { margin: 0; }
+  details summary {
+    cursor: pointer; color: var(--ink-soft);
+    font-weight: 500; font-size: 13px;
+    list-style: none;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: "▸ "; color: var(--muted); }
+  details[open] summary::before { content: "▾ "; }
+  details[open] summary { margin-bottom: 8px; }
+  /* Error column: soft red wash so failure rows are scannable */
+  td details + details pre,
+  details.error-pre pre {
+    background: #fef5f5;
+    border-color: #fecaca;
+    color: #7f1d1d;
+  }
+
+  /* ---- notice / error ---- */
+  .notice {
+    margin: 0 0 18px;
+    padding: 14px 18px;
+    background: var(--card);
+    border: 1px solid var(--card-edge);
+    border-radius: 14px;
+    box-shadow: var(--shadow-sm);
+    color: var(--ink);
+  }
+  .notice strong { color: var(--accent-1); }
+  .notice code { background: #fef3c7; color: #b45309; }
+  .notice-prominent { border-color: #fcd34d; background: #fffbeb; }
+  .key-reveal-row {
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+    margin-top: 10px;
+    max-width: 720px;
+  }
+  .key-reveal {
+    flex: 1;
+    padding: 10px 14px;
+    background: white;
+    border: 1px dashed #fcd34d;
+    border-radius: 10px;
+    color: #92400e;
+    font-size: 13px;
+    word-break: break-all;
+    user-select: all;
+  }
+  .copy-btn {
+    padding: 8px 16px;
+    border: 1px solid var(--card-edge);
+    border-radius: 10px;
+    background: white;
+    color: var(--ink);
+    font: inherit; font-size: 13px; font-weight: 600;
+    cursor: pointer; white-space: nowrap;
+    transition: background .12s ease, transform .12s ease;
+  }
+  .copy-btn:hover { background: #fff8f9; transform: translateY(-1px); }
+  .copy-btn.copied {
+    background: #d1fae5; color: #047857;
+    border-color: #86efac;
+  }
+  .copy-btn-mini {
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 13px; font-weight: 500;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .id-cell { display: inline-flex; align-items: center; }
+  .error {
+    margin: 0 0 18px;
+    padding: 14px 18px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 14px;
+    color: #b91c1c;
+    font-size: 14px; font-weight: 500;
+  }
+
+  /* ---- login page ---- */
+  .login {
+    max-width: 420px;
+    margin: 100px auto;
+    padding: 36px 32px;
+    background: var(--card);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--card-edge);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .login h1 { text-align: center; margin-bottom: 22px; font-size: 22px; }
+  .login label { margin-bottom: 14px; }
+  .login-brand {
+    display: flex; align-items: center; gap: 14px;
+    margin-bottom: 26px;
+  }
+  .brand-mark-lg {
+    width: 44px; height: 44px; border-radius: 12px;
+    font-size: 24px;
+  }
+  .login-brand-text { display: flex; flex-direction: column; }
+  .login-brand-name {
+    font-size: 17px; font-weight: 700; color: var(--ink);
+    letter-spacing: -0.01em;
+  }
+  .login-brand-sub {
+    font-size: 13px; color: var(--muted);
+  }
+
+  /* ---- mobile ---- */
+  @media (max-width: 900px) {
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .form-row-3 { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 760px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { border-right: 0; border-bottom: 1px solid var(--card-edge); padding: 12px; }
+    .nav { flex-direction: row; overflow-x: auto; gap: 6px; }
+    .nav-item { border-left: 0; border-bottom: 3px solid transparent; }
+    .nav-item.active { border-left: 0; border-bottom-color: var(--accent-1); }
+    .content { padding: 24px 20px 48px; }
+    .inline { flex-direction: column; }
+    table { display: block; overflow-x: auto; }
+  }
+"""

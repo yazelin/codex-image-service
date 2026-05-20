@@ -244,30 +244,45 @@
     <h2><span class="num">3</span>Install</h2>
     <p>
       Prerequisites: <a href="https://github.com/openai/codex">Codex CLI</a>
-      installed and <code class="inline">codex login</code> done on the host
-      that will run the container. Docker and Docker Compose installed.
+      installed and <code class="inline">codex login</code> done on the host.
+      Docker + Docker Compose for the containerized path.
     </p>
-<pre><span class="comment"># clone</span>
-<span class="accent">git clone</span> https://github.com/yazelin/codex-image-service
+    <p style="margin-top: 16px;"><strong>A. Local testing — no nginx</strong></p>
+<pre><span class="accent">git clone</span> https://github.com/yazelin/codex-image-service
 <span class="accent">cd</span> codex-image-service
-
-<span class="comment"># configure</span>
 <span class="accent">cp</span> .env.example .env
-<span class="comment"># edit .env: set ADMIN_PASSWORD, ADMIN_SESSION_SECRET, PUBLIC_BASE_URL</span>
+<span class="comment"># edit .env: set ADMIN_PASSWORD and ADMIN_SESSION_SECRET</span>
 
-<span class="comment"># run</span>
-<span class="accent">docker compose</span> up -d --build</pre>
+<span class="accent">docker compose</span> -f docker-compose.local.yml up -d --build
+<span class="accent">open</span> http://localhost:8000/admin</pre>
     <p>
-      The service listens on port 8000 inside the Docker network
-      <code class="inline">nginx_bridge_network</code>. Front it with your
-      existing nginx using the snippet in
-      <code class="inline">deploy/nginx.codex-image-service.location.conf.example</code>.
+      Maps port 8000 directly to your host, no reverse proxy required.
+      Image URLs in API responses come back as
+      <code class="inline">http://localhost:8000/generated/...</code>.
     </p>
+    <p style="margin-top: 20px;"><strong>B. Production — behind your existing nginx</strong></p>
+<pre><span class="comment"># .env: set ADMIN_PASSWORD, ADMIN_SESSION_SECRET,</span>
+<span class="comment"># PUBLIC_BASE_URL=https://YOUR-DOMAIN/codex-image,</span>
+<span class="comment"># ADMIN_URL_PREFIX=/codex-image</span>
+
+<span class="accent">docker compose</span> up -d --build
+<span class="comment"># then paste deploy/nginx.codex-image-service.location.conf.example</span>
+<span class="comment"># into your existing nginx and reload</span></pre>
     <p>
-      First-run smoke test:
+      The default <code class="inline">docker-compose.yml</code> attaches the
+      container to a pre-existing Docker network called
+      <code class="inline">nginx_bridge_network</code>. First-run smoke test:
     </p>
 <pre><span class="accent">curl</span> -sf https://YOUR-DOMAIN/codex-image/health
 <span class="comment"># {"status":"ok"}</span></pre>
+    <p style="margin-top: 20px;"><strong>C. No Docker — fastest dev loop</strong></p>
+<pre><span class="accent">python3</span> -m venv .venv && . .venv/bin/activate
+<span class="accent">pip</span> install -r requirements.txt
+<span class="accent">uvicorn</span> app.main:app --reload --port 8000</pre>
+    <p>
+      Uses your host's own <code class="inline">~/.codex/auth.json</code>
+      directly. Easiest for iterating on the code.
+    </p>
   </section>
 
   <section class="card">

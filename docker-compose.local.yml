@@ -1,0 +1,39 @@
+# Local-testing compose file — standalone, no nginx required.
+#
+# Usage:
+#   docker compose -f docker-compose.local.yml up -d --build
+#   open http://localhost:8000/admin
+#
+# Prereqs on the host:
+#   - Codex CLI installed and `codex login` completed
+#     (so ~/.codex/auth.json exists for the mount below)
+#   - Docker + Docker Compose
+#
+# This file is intentionally separate from the production docker-compose.yml,
+# which assumes the service lives behind an existing nginx on the
+# `nginx_bridge_network` Docker network.
+
+services:
+  codex-image-service:
+    build: .
+    container_name: codex-image-service-local
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Default to localhost so image URLs in API responses are reachable.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      # Admin lives at /admin (no path prefix) when not behind nginx.
+      ADMIN_URL_PREFIX: ${ADMIN_URL_PREFIX:-}
+      GENERATED_DIR: /app/static/generated
+      CODEX_WORKDIR: /app/data/codex-runs
+      DATABASE_URL: sqlite:////app/data/app.db
+    volumes:
+      - ./data:/app/data
+      - ./static/generated:/app/static/generated
+      - ./data/codex-home:/root/.codex
+      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
+      - ${HOME}/.codex/config.toml:/root/.codex/config.toml:ro

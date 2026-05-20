@@ -239,28 +239,43 @@
   <section class="card" id="install">
     <h2><span class="num">3</span>安裝</h2>
     <p>
-      前置：在要跑容器的那台主機上已經裝好 <a href="https://github.com/openai/codex">Codex CLI</a>
-      並 <code class="inline">codex login</code> 過。Docker 與 Docker Compose 也要有。
+      前置：<a href="https://github.com/openai/codex">Codex CLI</a> 已裝好、
+      <code class="inline">codex login</code> 完成。要跑 container 的話再加 Docker + Docker Compose。
     </p>
-<pre><span class="comment"># 取得程式碼</span>
-<span class="accent">git clone</span> https://github.com/yazelin/codex-image-service
+    <p style="margin-top: 16px;"><strong>A. 本機測試 — 不需要 nginx</strong></p>
+<pre><span class="accent">git clone</span> https://github.com/yazelin/codex-image-service
 <span class="accent">cd</span> codex-image-service
-
-<span class="comment"># 設定</span>
 <span class="accent">cp</span> .env.example .env
-<span class="comment"># 編輯 .env：設好 ADMIN_PASSWORD、ADMIN_SESSION_SECRET、PUBLIC_BASE_URL</span>
+<span class="comment"># 編輯 .env：設好 ADMIN_PASSWORD、ADMIN_SESSION_SECRET 即可</span>
 
-<span class="comment"># 啟動</span>
-<span class="accent">docker compose</span> up -d --build</pre>
+<span class="accent">docker compose</span> -f docker-compose.local.yml up -d --build
+<span class="accent">open</span> http://localhost:8000/admin</pre>
     <p>
-      容器在 Docker network <code class="inline">nginx_bridge_network</code> 上監聽 8000 port。
-      用你既有的 nginx 反代，把
-      <code class="inline">deploy/nginx.codex-image-service.location.conf.example</code>
-      的片段貼進你的 nginx 設定即可。
+      Port 8000 直接 bind 到你主機，不用 reverse proxy。
+      API 回傳的圖片網址會是
+      <code class="inline">http://localhost:8000/generated/...</code>。
     </p>
-    <p>初次健康檢查：</p>
+    <p style="margin-top: 20px;"><strong>B. 正式環境 — 接到既有 nginx 後面</strong></p>
+<pre><span class="comment"># .env 還要加：</span>
+<span class="comment"># PUBLIC_BASE_URL=https://YOUR-DOMAIN/codex-image</span>
+<span class="comment"># ADMIN_URL_PREFIX=/codex-image</span>
+
+<span class="accent">docker compose</span> up -d --build
+<span class="comment"># 然後把 deploy/nginx.codex-image-service.location.conf.example</span>
+<span class="comment"># 貼進你既有的 nginx，nginx -s reload</span></pre>
+    <p>
+      預設的 <code class="inline">docker-compose.yml</code> 會把 container 接到一個既有的
+      Docker network <code class="inline">nginx_bridge_network</code>。初次健康檢查：
+    </p>
 <pre><span class="accent">curl</span> -sf https://YOUR-DOMAIN/codex-image/health
 <span class="comment"># {"status":"ok"}</span></pre>
+    <p style="margin-top: 20px;"><strong>C. 完全不用 Docker — 開發最快</strong></p>
+<pre><span class="accent">python3</span> -m venv .venv && . .venv/bin/activate
+<span class="accent">pip</span> install -r requirements.txt
+<span class="accent">uvicorn</span> app.main:app --reload --port 8000</pre>
+    <p>
+      直接吃主機的 <code class="inline">~/.codex/auth.json</code>，不掛 volume，改 code 自動 reload。
+    </p>
   </section>
 
   <section class="card">
