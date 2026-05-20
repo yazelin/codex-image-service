@@ -34,6 +34,17 @@ into the host or burning separate OpenAI Images API credits.
 >   work inside Docker) and re-think the threat model before pointing it at
 >   anything important.
 
+## Admin dashboard
+
+Short live walk-through of the admin UI — API key management, request history with
+prompt + stdout + stderr, manual cleanup, and the test-generation form:
+
+<video src="https://github.com/yazelin/codex-image-service/raw/main/examples/admin-dashboard.mp4" controls width="700" muted playsinline></video>
+
+If your viewer doesn't render the inline player (some markdown renderers
+don't), the raw MP4 lives at
+[`examples/admin-dashboard.mp4`](./examples/admin-dashboard.mp4) (19 s, 1920×1200, 2.4 MB).
+
 ## What it gives you
 
 - `POST /v1/images/generate` — bearer-auth, sync, returns image URLs.
