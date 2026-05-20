@@ -113,7 +113,14 @@ async def overview(request: Request):
 async def keys_page(request: Request):
     if not _admin_user(request):
         return _redirect_login(request)
-    return HTMLResponse(_keys_page(request.app.state.settings, _prefix(request)))
+    # One-shot reveal: read+immediately clear the flash cookie that POST set.
+    new_key = request.cookies.get("_new_api_key")
+    html_body = _keys_page(request.app.state.settings, _prefix(request), new_api_key=new_key)
+    response = HTMLResponse(html_body)
+    if new_key:
+        # Path must match the one POST set, otherwise the browser won't drop it.
+        response.delete_cookie("_new_api_key", path=_url(request, "/admin/keys"))
+    return response
 
 
 @router.get("/admin/test", response_class=HTMLResponse, include_in_schema=False)
@@ -134,7 +141,7 @@ async def requests_page(request: Request):
 # mutation routes (POST)
 # ---------------------------------------------------------------------------
 
-@router.post("/admin/api-keys", response_class=HTMLResponse, include_in_schema=False)
+@router.post("/admin/api-keys", include_in_schema=False)
 async def create_api_key(request: Request):
     if not _admin_user(request):
         return _redirect_login(request)
@@ -142,7 +149,19 @@ async def create_api_key(request: Request):
     form = await request.form()
     name = str(form.get("name", ""))
     _, raw_key = db.create_api_key(settings, name)
-    return HTMLResponse(_keys_page(settings, _prefix(request), new_api_key=raw_key))
+    # PRG: stash the raw key in a short-lived flash cookie, then redirect.
+    # The GET handler reads it once and immediately clears the cookie, so
+    # a refresh on the keys page will NOT show the value again.
+    response = RedirectResponse(_url(request, "/admin/keys"), status_code=303)
+    response.set_cookie(
+        "_new_api_key",
+        raw_key,
+        httponly=True,
+        samesite="lax",
+        max_age=60,
+        path=_url(request, "/admin/keys"),
+    )
+    return response
 
 
 @router.post("/admin/api-keys/{key_id}/disable", include_in_schema=False)
@@ -272,7 +291,9 @@ def _keys_page(settings: Any, prefix: str, new_api_key: str | None = None) -> st
     if new_api_key:
         notice = (
             "<div class='notice notice-prominent'>"
-            "<strong>New API key created.</strong> Copy it now — it will not be shown again."
+            "<strong>New API key created.</strong> Copy it now — refresh or "
+            "leave this page and the raw value is gone forever "
+            "(only the sha256 hash stays on the server)."
             "<div class='key-reveal-row'>"
             f"<code class='key-reveal' id='new-key-value'>{html.escape(new_api_key)}</code>"
             "<button class='copy-btn' type='button' data-copy-target='new-key-value'>Copy</button>"

@@ -209,7 +209,7 @@
     </p>
     <p>
       這個服務提供第三條路：把 <code class="inline">$imagegen</code> 包成一條
-      <code class="inline">Authorization: Bearer cimg_*</code> 的小 HTTP API，
+      <code class="inline">Authorization: Bearer cimg_&lt;random-token&gt;</code> 的小 HTTP API，
       搭配一個 admin 後台讓你可以隨時發 key、停 key、刪 key。
       一個 ChatGPT 帳號、多個 caller、不必多花一塊錢。
     </p>
@@ -282,7 +282,8 @@
     <h2><span class="num">4</span>怎麼用</h2>
     <p>
       到 <code class="inline">/codex-image/admin</code> 登入，按 <strong>Create API Key</strong>，
-      把跳出來的 <code class="inline">cimg_*</code>（只顯示一次）複製起來，然後就可以打 API：
+      把跳出來的 <code class="inline">cimg_&lt;random-token&gt;</code> 複製起來。
+      重整或離開這頁之後原始字串就消失了（伺服器只留 sha256 hash），然後就可以打 API：
     </p>
 <pre><span class="comment"># shell / GitHub Actions</span>
 <span class="accent">curl</span> -sS --fail --max-time 650 \

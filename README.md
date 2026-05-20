@@ -114,7 +114,9 @@ curl -sf https://images.example.com/codex-image/health
 ```
 
 Open `https://images.example.com/codex-image/admin`, log in, click
-**Create API Key**, and copy the `cimg_*` token (shown once).
+**Create API Key**, and copy the `cimg_<random-token>` value. Refresh
+or leave the page and the raw value is gone forever — only the sha256
+hash stays on the server.
 
 ## Use
 

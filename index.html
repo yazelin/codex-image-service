@@ -212,7 +212,7 @@
     <p>
       This service does (c): expose <code class="inline">$imagegen</code> over
       a tiny HTTP API behind <code class="inline">Authorization: Bearer
-      cimg_*</code>, with an admin UI to issue / revoke keys per caller.
+      cimg_&lt;random-token&gt;</code>, with an admin UI to issue / revoke keys per caller.
       One ChatGPT account, many consumers, no extra spend.
     </p>
   </section>
@@ -289,8 +289,9 @@
     <h2><span class="num">4</span>Use</h2>
     <p>
       Log in to <code class="inline">/codex-image/admin</code>, click
-      <strong>Create API Key</strong>, copy the <code class="inline">cimg_*</code>
-      value (shown once). Then hit the API:
+      <strong>Create API Key</strong>, copy the <code class="inline">cimg_&lt;random-token&gt;</code>
+      value. Refresh or leave the page and the raw value is gone forever —
+      only the sha256 hash stays on the server. Then hit the API:
     </p>
 <pre><span class="comment"># shell / GitHub Actions</span>
 <span class="accent">curl</span> -sS --fail --max-time 650 \
