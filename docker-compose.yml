@@ -38,15 +38,23 @@ services:
     volumes:
       - ./data:/app/data
       - ./static/generated:/app/static/generated
-      # Multi-account parent dir. Create labelled subdirs under ~/codex-homes/
-      # via `CODEX_HOME=~/codex-homes/<label> codex login`. The whole tree is
-      # mounted read-only — refresh of access tokens happens host-side when
-      # you (or a cron) periodically use codex from each home.
-      - ${HOME}/codex-homes:/host_codex_homes:ro
-      # Single-account compatibility: if you skip the multi-account setup
-      # and only have one account at ~/.codex, point CODEX_HOMES at this
-      # path instead (CODEX_HOMES=/root/.codex).
-      - ${HOME}/.codex:/root/.codex:ro
+      # Single-account default mount: empty RW base + RO file overlays.
+      # Codex CLI needs to write sessions, history.jsonl, logs, PATH-update
+      # checks inside CODEX_HOME, so a flat :ro mount breaks startup with
+      # "failed to initialize in-process app-server client". The base
+      # `./data/codex-home` is a per-container scratch dir we create on
+      # build; the two file overlays keep auth.json / config.toml read-only
+      # so the host's interactive codex stays the source of truth for
+      # tokens. Override CODEX_HOMES in .env to point elsewhere.
+      - ./data/codex-home:/root/.codex
+      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
+      - ${HOME}/.codex/config.toml:/root/.codex/config.toml:ro
+      # Multi-account parent dir. Each subdir under ~/codex-homes/ is a
+      # service-dedicated CODEX_HOME (created via
+      # `CODEX_HOME=~/codex-homes/<label> codex login`). Mounted RW because
+      # codex needs to write sessions + may refresh tokens inside the
+      # directory; there's no concurrent host-side use to race against.
+      - ${HOME}/codex-homes:/host_codex_homes
     networks:
       - nginx_bridge_network
 

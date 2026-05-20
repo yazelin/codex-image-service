@@ -18,24 +18,32 @@ from app.services import storage
 _SESSION_ID_RE = re.compile(r"^session id:\s*([0-9a-fA-F-]+)\s*$", re.MULTILINE)
 
 
-def _codex_home() -> Path:
-    """Where Codex CLI stashes its generated_images output."""
+def _codex_home(explicit: str | None = None) -> Path:
+    """Where Codex CLI stashes its generated_images output.
+
+    Each subprocess run uses its own CODEX_HOME (round-robin or per-account
+    routing). Pass the home the subprocess was given so we look in the
+    matching tree, not the service process's own env.
+    """
+    if explicit:
+        return Path(explicit)
     return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
 
-def _find_generated_in_session(stderr: str) -> Path | None:
+def _find_generated_in_session(stderr: str, codex_home: str | None = None) -> Path | None:
     """Extract Codex's session id from stderr and locate the image_gen output.
 
     The built-in image_gen tool writes to
     ``$CODEX_HOME/generated_images/<session_id>/ig_<hex>.png`` on every call.
     In edit mode the model often skips the follow-up copy step, so we have to
-    fish the file out ourselves.
+    fish the file out ourselves. Pass the per-attempt codex_home — without it,
+    multi-account runs look in the wrong tree and recovery silently fails.
     """
     match = _SESSION_ID_RE.search(stderr or "")
     if not match:
         return None
     session_id = match.group(1).strip()
-    session_dir = _codex_home() / "generated_images" / session_id
+    session_dir = _codex_home(codex_home) / "generated_images" / session_id
     if not session_dir.is_dir():
         return None
     candidates = sorted(
@@ -193,10 +201,14 @@ class CodexImageGenerator:
                         run_dir, exclude={reference_path} if reference_path else set()
                     )
                     # 2) Edit-mode often leaves the result only in
-                    #    ~/.codex/generated_images/<session>/ig_*.png and
-                    #    the model forgets the final cp step. Recover it.
+                    #    $CODEX_HOME/generated_images/<session>/ig_*.png and
+                    #    the model forgets the final cp step. Recover it —
+                    #    looking under the SAME CODEX_HOME the subprocess used
+                    #    (critical for multi-account / round-robin runs).
                     if not fallback:
-                        fallback = _find_generated_in_session(stderr)
+                        fallback = _find_generated_in_session(
+                            stderr, codex_home=codex_home_used
+                        )
                     if fallback:
                         shutil.copy2(fallback, output_path)
                 if not output_path.exists():

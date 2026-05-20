@@ -38,9 +38,12 @@ services:
     volumes:
       - ./data:/app/data
       - ./static/generated:/app/static/generated
-      # Single-account default: bind the host's main ~/.codex.
-      - ${HOME}/.codex:/root/.codex:ro
-      # Multi-account parent dir (optional). Only used when CODEX_HOMES
-      # points at paths under /host_codex_homes/. Create labelled subdirs
-      # via `CODEX_HOME=~/codex-homes/<label> codex login`.
-      - ${HOME}/codex-homes:/host_codex_homes:ro
+      # Single-account default: empty RW base + RO file overlays so Codex
+      # can write sessions/history while the host's auth.json / config.toml
+      # stay authoritative.
+      - ./data/codex-home:/root/.codex
+      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
+      - ${HOME}/.codex/config.toml:/root/.codex/config.toml:ro
+      # Multi-account parent dir (optional). Mounted RW so codex can refresh
+      # tokens / write sessions inside each service-dedicated subdir.
+      - ${HOME}/codex-homes:/host_codex_homes
