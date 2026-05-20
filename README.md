@@ -142,6 +142,32 @@ Response:
 }
 ```
 
+### Image edit (single or multi-image composition)
+
+Attach 1–4 reference images as base64 strings under `reference_images_base64`.
+The service runs `codex exec --image <each> -- <prompt>`, which feeds them all
+to gpt-image-2 edit. Use this for outfit swaps, scene merges, "put X from
+image 1 into image 2", etc.
+
+```bash
+A=$(base64 -w0 < person.png)
+B=$(base64 -w0 < kitchen.png)
+curl -sS --fail --max-time 650 \
+  -X POST https://images.example.com/codex-image/v1/images/generate \
+  -H "Authorization: Bearer $CODEX_IMAGE_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n --arg a "$A" --arg b "$B" '{
+    prompt: "place the person from image 1 into the kitchen scene from image 2, preserve their face and outfit",
+    reference_images_base64: [$a, $b],
+    size: "1024x1024",
+    quality: "medium"
+  }')"
+```
+
+`count` is forced to 1 in edit mode (gpt-image-2 edit returns one image).
+The legacy singular field `reference_image_base64: "<base64>"` still works
+and is treated as a 1-element list.
+
 Python, GitHub Actions, and full deployment details live on the
 [Pages site](https://yazelin.github.io/codex-image-service/).
 
