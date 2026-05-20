@@ -131,9 +131,16 @@ def disable_api_key(settings: Settings, key_id: str) -> None:
 
 
 def delete_api_key(settings: Settings, key_id: str) -> None:
-    # Image history rows keep their api_key_id pointing at the now-deleted key
-    # so usage records survive (we don't enforce FK in SQLite by default).
+    # FK constraint (PRAGMA foreign_keys=ON) blocks deleting a key that has
+    # image_requests rows. Unlink those rows first by setting api_key_id NULL
+    # so history survives — list_image_requests uses LEFT JOIN, so the Key
+    # column just becomes "—" for orphaned rows. Both statements run in one
+    # transaction.
     with connect(settings) as connection:
+        connection.execute(
+            "UPDATE image_requests SET api_key_id = NULL WHERE api_key_id = ?",
+            (key_id,),
+        )
         connection.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
 
 
