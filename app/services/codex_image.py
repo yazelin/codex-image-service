@@ -6,6 +6,7 @@ import binascii
 import os
 import re
 import shutil
+import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,10 +229,16 @@ class CodexImageGenerator:
             command.extend(["--image", str(reference_path.resolve()), "--"])
         command.append(instruction)
         command_display = " ".join(command[:-1]) + " <imagegen prompt>"
+        # start_new_session=True puts codex in its own process group so we can
+        # kill its bash / python descendants on timeout. Without this,
+        # `process.kill()` only stops the codex binary and orphaned children
+        # (e.g. PIL hand-drawing scripts) keep stdout/stderr open, blocking
+        # process.communicate() forever and wedging the worker.
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
 
         try:
@@ -240,8 +247,18 @@ class CodexImageGenerator:
                 timeout=self.settings.codex_timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
-            process.kill()
-            stdout_bytes, stderr_bytes = await process.communicate()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                # codex already exited or we have no rights — fall through
+                pass
+            # Bound the post-kill drain so a slow OS cleanup can't hang us.
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    process.communicate(), timeout=5
+                )
+            except asyncio.TimeoutError:
+                stdout_bytes, stderr_bytes = b"", b""
             raise CodexGenerationError(
                 f"Codex timed out after {self.settings.codex_timeout_seconds} seconds",
                 stdout=stdout_bytes.decode("utf-8", errors="replace"),
@@ -300,14 +317,20 @@ class CodexImageGenerator:
                 "files. Final answer should only contain the saved image path."
             )
         return (
-            "Use Codex image generation directly to create an image.\n"
+            "Call the built-in image_gen tool to create an image. "
+            "Do NOT write Python, shell, or any code (PIL / Pillow, ImageMagick, "
+            "matplotlib, manual SVG, etc.) to draw the image yourself — the only "
+            "correct action is one call to image_gen with the user's prompt. "
+            "If image_gen produces output that does not perfectly match the prompt "
+            "(e.g. text rendering issues for non-Latin scripts), still return what "
+            "image_gen gave us — do not 'fix' it with code.\n"
             "$imagegen\n"
             f"User prompt for {image_label}: {prompt}\n"
             f"Size: {size}\n"
             f"Quality: {quality}\n"
             f"Save the final PNG image exactly at this path: {output_path.resolve()}\n"
-            "Do not create or modify any other project files. "
-            "If a generated file is placed elsewhere first, copy it to the exact path above. "
+            "If image_gen writes the file elsewhere first, copy it to the exact "
+            "path above. Do not create or modify any other project files. "
             "Final answer should only contain the saved image path."
         )
 
