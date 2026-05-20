@@ -10,3 +10,6 @@ data/
 static/generated/*
 !static/generated/.gitkeep
 
+
+# git worktrees (superpowers skill)
+.worktrees/
