@@ -415,18 +415,31 @@ class CodexImageGenerator:
     ) -> str:
         image_label = f"image {index + 1} of {count}" if count > 1 else "the image"
         if reference_paths:
-            ref = reference_paths[0]
+            input_lines = "\n".join(
+                f"Image {i}: {p.resolve()}" for i, p in enumerate(reference_paths, start=1)
+            )
+            if len(reference_paths) == 1:
+                constraint = (
+                    "Constraints: preserve the subject identity, framing, and "
+                    "geometry of the input image except where the request asks otherwise."
+                )
+            else:
+                constraint = (
+                    "Constraints: treat the input images as references the user is "
+                    "composing with — preserve identity and content from each image "
+                    "as the request implies (e.g. subject from Image 1, scene from "
+                    "Image 2). The prompt below tells you how to combine them."
+                )
             return (
-                "Call the built-in image_gen tool to edit the input image. "
+                "Call the built-in image_gen tool to edit using the input image(s). "
                 "Do NOT write Python, shell, or any code to transform the "
                 "image yourself — the only correct action is one call to "
                 "image_gen with the user's edit request.\n"
                 "$imagegen\n"
                 "Use case: image-edit\n"
-                f"Input images: Image 1: {ref.resolve()}\n"
+                f"Input images:\n{input_lines}\n"
                 f"Primary request: {prompt}\n"
-                "Constraints: preserve the subject identity, framing, and "
-                "geometry of Image 1 except where the request asks otherwise.\n"
+                f"{constraint}\n"
                 f"Output size: {size}\n"
                 f"Quality: {quality}\n"
                 f"Save the resulting PNG image exactly at this path: {output_path.resolve()}\n"

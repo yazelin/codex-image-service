@@ -149,7 +149,8 @@ class EditModeRouting(unittest.TestCase):
         # Canonical scaffolding from sample-prompts.md so gpt-5.5 routes to
         # the image_gen tool instead of hand-rolling PIL code
         self.assertIn("Use case: image-edit", text)
-        self.assertIn("Input images: Image 1:", text)
+        self.assertIn("Image 1:", text)
+        self.assertIn("Input images:", text)
         self.assertIn("Primary request:", text)
         # And references the saved reference file by absolute path
         self.assertIn(str(captured["reference_paths"][0].resolve()), text)
@@ -430,6 +431,29 @@ class MultiImageRouting(unittest.TestCase):
         )
         names = [name for name, _ in captured["snapshots"]]
         self.assertEqual(names, ["reference_1.png"])
+
+    def test_instruction_enumerates_each_image(self):
+        png = _make_png_bytes()
+        captured = self._run(
+            reference_b64_list=[
+                base64.b64encode(png).decode("ascii"),
+                base64.b64encode(png).decode("ascii"),
+                base64.b64encode(png).decode("ascii"),
+            ],
+            request_id="img_three_refs",
+        )
+        text = captured["instruction"]
+        # The scaffolding lists every input image explicitly so image_gen
+        # knows which is which when the prompt references them by number.
+        self.assertIn("Image 1:", text)
+        self.assertIn("Image 2:", text)
+        self.assertIn("Image 3:", text)
+        # The constraint line should generalize to all input images, not
+        # name only Image 1.
+        self.assertNotIn("geometry of Image 1 except", text)
+        # All three reference paths should be embedded
+        for ref in captured["reference_paths"]:
+            self.assertIn(str(ref.resolve()), text)
 
 
 class CodexArgvBuilder(unittest.TestCase):
