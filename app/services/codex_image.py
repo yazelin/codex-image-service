@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -16,6 +18,37 @@ from app.services import storage
 
 
 _SESSION_ID_RE = re.compile(r"^session id:\s*([0-9a-fA-F-]+)\s*$", re.MULTILINE)
+
+# Filename of the per-CODEX_HOME advisory lock. Lives *inside* the home dir so
+# the same inode is visible to every process that touches that home — the
+# container's workers AND any host-side `codex` run sharing the bind mount —
+# giving cross-process serialization on top of the in-process asyncio.Lock.
+_EXEC_LOCK_NAME = ".codex-exec.lock"
+
+
+def _flock_acquire(path: Path) -> int | None:
+    """Best-effort exclusive flock on `path`. Returns the held fd, or None if
+    the lock could not be taken (never fatal — the in-process asyncio.Lock is
+    still in force, so degrading here only loosens *cross-process* safety)."""
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _flock_release(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _codex_home(explicit: str | None = None) -> Path:
@@ -108,6 +141,47 @@ class CodexImageGenerator:
         # Empty tuple = use container default ($HOME/.codex), no rotation.
         self._home_cursor = 0
         self._home_lock = asyncio.Lock()
+        # One exec lock per CODEX_HOME. ChatGPT uses refresh-token rotation
+        # with reuse-detection: if two `codex` processes refresh the SAME
+        # home's auth.json at once, one rotates the token and the other reuses
+        # the now-stale refresh token, which makes OpenAI revoke the whole
+        # token family (HTTP 401 token_invalidated). That bites here via the
+        # cross-account retry path (a request retried onto home B can collide
+        # with another worker already running on home B). Serialize every
+        # `codex exec` per home so only one process touches a given auth.json
+        # at a time.
+        self._exec_locks: dict[str, asyncio.Lock] = {}
+
+    def _exec_lock_for(self, codex_home: str | None) -> asyncio.Lock:
+        key = codex_home or "__container_default__"
+        lock = self._exec_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._exec_locks[key] = lock
+        return lock
+
+    @contextlib.asynccontextmanager
+    async def _home_exec_guard(self, codex_home: str | None):
+        """Serialize codex execution for one CODEX_HOME.
+
+        In-process: the per-home asyncio.Lock orders this process's own
+        workers/retries. Cross-process: an flock on `<home>/.codex-exec.lock`
+        (acquired in a thread so the event loop keeps serving other homes)
+        blocks any other process — including a host-side `codex` run on the
+        same bind-mounted home. Lock acquisition happens before the codex
+        timeout starts, so waiting here never counts against the run timeout.
+        """
+        async with self._exec_lock_for(codex_home):
+            if not codex_home:
+                yield
+                return
+            loop = asyncio.get_running_loop()
+            lock_path = Path(codex_home) / _EXEC_LOCK_NAME
+            fd = await loop.run_in_executor(None, _flock_acquire, lock_path)
+            try:
+                yield
+            finally:
+                await loop.run_in_executor(None, _flock_release, fd)
 
     async def _claim_primary_base(self) -> int:
         """Reserve the next round-robin slot for one request.
@@ -358,37 +432,41 @@ class CodexImageGenerator:
         env = os.environ.copy()
         if codex_home:
             env["CODEX_HOME"] = codex_home
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-            env=env,
-        )
-
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                process.communicate(),
-                timeout=self.settings.codex_timeout_seconds,
+        # Hold the per-home exec lock for the whole codex run: the token
+        # refresh that must not race with another process happens *during*
+        # the run, not just at launch.
+        async with self._home_exec_guard(codex_home):
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+                env=env,
             )
-        except asyncio.TimeoutError as exc:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    process.communicate(), timeout=5
+                    process.communicate(),
+                    timeout=self.settings.codex_timeout_seconds,
                 )
-            except asyncio.TimeoutError:
-                stdout_bytes, stderr_bytes = b"", b""
-            raise CodexGenerationError(
-                f"Codex timed out after {self.settings.codex_timeout_seconds} seconds",
-                stdout=stdout_bytes.decode("utf-8", errors="replace"),
-                stderr=stderr_bytes.decode("utf-8", errors="replace"),
-                command=command_display,
-                workdir=run_dir,
-            ) from exc
+            except asyncio.TimeoutError as exc:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        process.communicate(), timeout=5
+                    )
+                except asyncio.TimeoutError:
+                    stdout_bytes, stderr_bytes = b"", b""
+                raise CodexGenerationError(
+                    f"Codex timed out after {self.settings.codex_timeout_seconds} seconds",
+                    stdout=stdout_bytes.decode("utf-8", errors="replace"),
+                    stderr=stderr_bytes.decode("utf-8", errors="replace"),
+                    command=command_display,
+                    workdir=run_dir,
+                ) from exc
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")

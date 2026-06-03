@@ -60,8 +60,14 @@ services:
       # Multi-account parent dir. Each subdir under ~/codex-homes/ is a
       # service-dedicated CODEX_HOME (created via
       # `CODEX_HOME=~/codex-homes/<label> codex login`). Mounted RW because
-      # codex needs to write sessions + may refresh tokens inside the
-      # directory; there's no concurrent host-side use to race against.
+      # codex needs to write sessions + refreshes tokens inside the directory.
+      # IMPORTANT: concurrent refresh of one home's auth.json (two workers, or
+      # a host-side `codex` run on the same dir) trips ChatGPT's refresh-token
+      # reuse-detection and revokes the whole token family. The service guards
+      # each home with an flock on `<home>/.codex-exec.lock`; any host-side
+      # script touching these homes must take the same lock, e.g.:
+      #   flock ~/codex-homes/<label>/.codex-exec.lock \
+      #     env CODEX_HOME=~/codex-homes/<label> codex exec ...
       - ${HOME}/codex-homes:/host_codex_homes
     networks:
       - nginx_bridge_network
