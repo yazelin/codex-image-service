@@ -326,6 +326,29 @@ images = r.json()[<span class="str">"images"</span>]   <span class="comment"># [
               <span class="str">"expires_at"</span>: <span class="str">"..."</span>}],
   <span class="str">"created_at"</span>: <span class="str">"..."</span>
 }</pre>
+    <p style="margin-top: 20px;"><strong>非同步 Job API（送單 + 輪詢）</strong> —
+      產圖要 70–180 秒；如果呼叫端前面有 timeout 較短的 proxy
+      （Cloudflare Workers、預設 nginx），別把連線一路掛著，改用 job 端點。
+      request body 完全相同，立刻回 <code class="inline">202</code>：
+    </p>
+<pre><span class="comment"># 送單 — 馬上回來</span>
+<span class="accent">curl</span> -sS --fail -X POST https://YOUR-DOMAIN/codex-image/v1/images/jobs \
+  -H <span class="str">"Authorization: Bearer $CODEX_IMAGE_KEY"</span> \
+  -H <span class="str">"Content-Type: application/json"</span> \
+  -d <span class="str">'{"prompt":"...","size":"1024x1024","quality":"medium","count":1}'</span>
+<span class="comment"># {"id":"img_3f81...","status":"queued"}</span>
+
+<span class="comment"># 輪詢直到 succeeded / failed — 前段每 5 秒，之後退到每 10 秒</span>
+<span class="accent">curl</span> -sS --fail https://YOUR-DOMAIN/codex-image/v1/images/jobs/img_3f81... \
+  -H <span class="str">"Authorization: Bearer $CODEX_IMAGE_KEY"</span></pre>
+    <p>
+      <code class="inline">status</code> 會走
+      <code class="inline">queued → running → succeeded | failed</code>
+      （過保留期後變 <code class="inline">expired</code>）；成功時 body 帶的
+      <code class="inline">images</code> 陣列跟同步端點一模一樣。job 只有
+      送單的那把 API key 看得到 — 別把 key 換來換去，其他 key 跟不存在的
+      id 一律拿到 <code class="inline">404</code>。同步端點維持完全相容。
+    </p>
   </section>
 
   <section class="card">
