@@ -41,3 +41,17 @@ class ImageGenerateResponse(BaseModel):
     status: str
     images: list[GeneratedImage]
     created_at: str
+
+
+class ImageJobSubmitResponse(BaseModel):
+    id: str
+    status: str  # "queued"
+
+
+class ImageJobStatusResponse(BaseModel):
+    id: str
+    status: str  # queued|running|succeeded|failed|expired
+    images: list[GeneratedImage] = []
+    error: str | None = None
+    created_at: str
+    expires_at: str | None = None
