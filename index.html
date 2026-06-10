@@ -336,6 +336,31 @@ images = r.json()[<span class="str">"images"</span>]   <span class="comment"># [
               <span class="str">"expires_at"</span>: <span class="str">"..."</span>}],
   <span class="str">"created_at"</span>: <span class="str">"..."</span>
 }</pre>
+    <p style="margin-top: 20px;"><strong>Async job API (submit + poll)</strong> —
+      generation takes 70–180 s; if your caller sits behind a proxy with a
+      shorter timeout (Cloudflare Workers, default nginx), use the job
+      endpoints instead of holding the connection open. Same request body,
+      returns <code class="inline">202</code> immediately:
+    </p>
+<pre><span class="comment"># submit — returns right away</span>
+<span class="accent">curl</span> -sS --fail -X POST https://YOUR-DOMAIN/codex-image/v1/images/jobs \
+  -H <span class="str">"Authorization: Bearer $CODEX_IMAGE_KEY"</span> \
+  -H <span class="str">"Content-Type: application/json"</span> \
+  -d <span class="str">'{"prompt":"...","size":"1024x1024","quality":"medium","count":1}'</span>
+<span class="comment"># {"id":"img_3f81...","status":"queued"}</span>
+
+<span class="comment"># poll until succeeded / failed — every 5s at first, back off to 10s</span>
+<span class="accent">curl</span> -sS --fail https://YOUR-DOMAIN/codex-image/v1/images/jobs/img_3f81... \
+  -H <span class="str">"Authorization: Bearer $CODEX_IMAGE_KEY"</span></pre>
+    <p>
+      <code class="inline">status</code> goes
+      <code class="inline">queued → running → succeeded | failed</code>
+      (plus <code class="inline">expired</code> after retention); on success
+      the body carries the same <code class="inline">images</code> array as
+      the sync endpoint. Jobs are visible only to the API key that submitted
+      them — other keys and unknown ids get <code class="inline">404</code>.
+      The sync endpoint stays fully compatible.
+    </p>
   </section>
 
   <section class="card">

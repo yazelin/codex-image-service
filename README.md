@@ -48,6 +48,9 @@ don't), the raw MP4 lives at
 ## What it gives you
 
 - `POST /v1/images/generate` — bearer-auth, sync, returns image URLs.
+- `POST /v1/images/jobs` — bearer-auth, async: returns `202` with a job id
+  immediately, no long-lived connection needed.
+- `GET /v1/images/jobs/<id>` — poll job status until `succeeded` / `failed`.
 - `GET /generated/<id>.png` — public download for the generated PNGs.
 - `GET /health` — `{"status":"ok"}`.
 - Admin UI under `/admin` for issuing / disabling / deleting API keys,
@@ -182,13 +185,77 @@ and is treated as a 1-element list.
 Python, GitHub Actions, and full deployment details live on the
 [Pages site](https://yazelin.github.io/codex-image-service/).
 
+### Async job API (submit + poll)
+
+Generation takes 70–180 s. The sync endpoint above holds the HTTP
+connection open the whole time, which breaks behind proxies with shorter
+timeouts (Cloudflare Workers, nginx defaults) — and if the proxy gives up
+with a 504, the result is lost even though the image was generated. For
+long-running callers, prefer the job endpoints; the sync endpoint stays
+fully compatible.
+
+Submit (returns immediately with `202`):
+
+```bash
+curl -sS --fail \
+  -X POST https://images.example.com/codex-image/v1/images/jobs \
+  -H "Authorization: Bearer $CODEX_IMAGE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"a clean product photo of a ceramic tea cup","size":"1024x1024","quality":"medium","count":1}'
+# {"id":"img_3f81...","status":"queued"}
+```
+
+The request body is identical to `/v1/images/generate`, including
+`reference_images_base64` for edit mode. `503` means the queue is full —
+retry later.
+
+Poll:
+
+```bash
+curl -sS --fail \
+  https://images.example.com/codex-image/v1/images/jobs/img_3f81... \
+  -H "Authorization: Bearer $CODEX_IMAGE_KEY"
+```
+
+```json
+{
+  "id": "img_3f81...",
+  "status": "succeeded",
+  "images": [
+    {"url": "https://images.example.com/codex-image/generated/img_3f81....png",
+     "expires_at": "2026-06-17T..."}
+  ],
+  "error": null,
+  "created_at": "2026-06-10T...",
+  "expires_at": "2026-06-17T..."
+}
+```
+
+`status` is one of `queued` / `running` / `succeeded` / `failed` /
+`expired`. On `failed`, `error` carries the reason. Jobs are only visible
+to the API key that submitted them; any other key (or an unknown id) gets
+`404`.
+
+Polling advice: every 5 s for the first ~90 s, then back off to every
+10 s. Give up after ~10 min — by then the job has either finished or
+failed server-side.
+
+**Deploying this to an existing homelab instance:** the endpoints ship in
+the app image, so update the checkout and rebuild:
+
+```bash
+git pull && docker compose up -d --build
+```
+
 ## Queue behavior
 
-Requests are enqueued internally; background workers run `codex exec`. The
-HTTP request stays open until the image is ready or
-`REQUEST_WAIT_TIMEOUT_SECONDS` (default 600) elapses. Concurrency is
+Requests are enqueued internally; background workers run `codex exec`. On
+the sync endpoint the HTTP request stays open until the image is ready or
+`REQUEST_WAIT_TIMEOUT_SECONDS` (default 600) elapses; the async job
+endpoint returns as soon as the job is queued. Concurrency is
 controlled by `CODEX_WORKER_CONCURRENCY` (default 2). Queue depth is
-capped at `GENERATION_QUEUE_MAX_SIZE` (default 50).
+capped at `GENERATION_QUEUE_MAX_SIZE` (default 50). Both endpoints share
+the same queue and the same depth cap.
 
 ## Multi-account round-robin (optional)
 
