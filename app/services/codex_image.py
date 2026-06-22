@@ -5,6 +5,7 @@ import base64
 import binascii
 import contextlib
 import fcntl
+import json
 import os
 import re
 import shutil
@@ -89,6 +90,51 @@ def _find_generated_in_session(stderr: str, codex_home: str | None = None) -> Pa
         reverse=True,
     )
     return candidates[0] if candidates else None
+
+
+def _find_image_in_rollout(stderr: str, codex_home: str | None = None) -> bytes | None:
+    """Recover the generated image from the session rollout (Codex >= 0.141).
+
+    Newer Codex no longer writes ``generated_images/<session_id>/*.png``; instead
+    it embeds the image as base64 in the session rollout jsonl
+    (``payload.result`` of the ``image_generation_end`` / ``image_generation_call``
+    event). Locate the rollout by session id and decode the (last) image out of it.
+    Returns the raw image bytes, or None if nothing recoverable is found.
+    """
+    match = _SESSION_ID_RE.search(stderr or "")
+    if not match:
+        return None
+    session_id = match.group(1).strip()
+    sessions_dir = _codex_home(codex_home) / "sessions"
+    if not sessions_dir.is_dir():
+        return None
+    rollouts = sorted(
+        sessions_dir.rglob(f"*{session_id}.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not rollouts:
+        return None
+    b64: str | None = None
+    with rollouts[0].open(encoding="utf-8") as fh:
+        for line in fh:
+            if "iVBORw0KGgo" not in line:  # cheap pre-filter: PNG base64 magic bytes
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            payload = obj.get("payload", {}) if isinstance(obj, dict) else {}
+            if payload.get("type") in ("image_generation_end", "image_generation_call"):
+                result = payload.get("result")
+                if isinstance(result, str) and result:
+                    b64 = result  # keep the last (newest) image in the session
+    if not b64:
+        return None
+    try:
+        return base64.b64decode(b64)
+    except (binascii.Error, ValueError):
+        return None
 
 
 def _detect_image_ext(data: bytes) -> str:
@@ -291,6 +337,14 @@ class CodexImageGenerator:
                         )
                     if fallback:
                         shutil.copy2(fallback, output_path)
+                    else:
+                        # Codex >= 0.141: no file on disk — the image is base64 in
+                        # the session rollout. Decode it straight to output_path.
+                        rollout_bytes = _find_image_in_rollout(
+                            stderr, codex_home=codex_home_used
+                        )
+                        if rollout_bytes:
+                            output_path.write_bytes(rollout_bytes)
                 if not output_path.exists():
                     raise CodexGenerationError(
                         f"Codex completed but did not create {output_path}",
