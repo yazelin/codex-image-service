@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git nodejs npm \
-    && npm install -g @openai/codex@0.131.0 \
+    && npm install -g @openai/codex@0.141.0 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
