@@ -5,6 +5,7 @@ import base64
 import binascii
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from app import db
 from app.config import Settings
 from app.services import storage
 
@@ -50,6 +52,15 @@ def _flock_release(fd: int | None) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+def _sha256_file(path: Path) -> str:
+    """Content hash of a file (for stale/duplicate-image detection)."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _codex_home(explicit: str | None = None) -> Path:
@@ -379,6 +390,26 @@ class CodexImageGenerator:
                         workdir=run_dir,
                     )
                 image_paths.append(output_path)
+
+            # 內容去重(治本):Codex 在婉拒/額度/resumed-session 等情況會把「上一張舊圖」
+            # 當新圖回傳,且 service 看起來成功 → 消費端的 fallback 不會觸發。比對 sha256,
+            # 撞到任何先前輸出就視為失敗丟出 → 既有 except 會刪檔並上拋 → 502 → 消費端
+            # (catime)改走自己的 gemini fallback。檔案 mtime 守不住「新檔舊內容」,雜湊可以。
+            for img_path in image_paths:
+                sha = _sha256_file(img_path)
+                dup_id = db.output_sha_seen_before(
+                    self.settings, sha, exclude_request_id=request_id
+                )
+                if dup_id is not None:
+                    raise CodexGenerationError(
+                        f"Output duplicates a previous image (request {dup_id}); "
+                        "rejecting so the caller can fall back.",
+                        stdout="\n".join(stdout_parts),
+                        stderr="\n".join(stderr_parts),
+                        command=command_display,
+                        workdir=run_dir,
+                    )
+                db.record_output_sha(self.settings, request_id, sha)
         except Exception:
             for image_path in image_paths:
                 if image_path.exists():
