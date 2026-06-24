@@ -80,6 +80,15 @@ def init_db(settings: Settings | None = None) -> None:
         }
         if "codex_home" not in existing_cols:
             connection.execute("ALTER TABLE image_requests ADD COLUMN codex_home TEXT")
+        # output_sha256 = content hash of the produced image. Used to detect when
+        # Codex hands back a *previous* image as if newly generated (stale/duplicate
+        # bug) — an exact content match across two requests is the signature.
+        if "output_sha256" not in existing_cols:
+            connection.execute("ALTER TABLE image_requests ADD COLUMN output_sha256 TEXT")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_requests_output_sha "
+            "ON image_requests(output_sha256)"
+        )
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -221,6 +230,37 @@ def mark_image_request_succeeded(
                 request_id,
             ),
         )
+
+
+def record_output_sha(settings: Settings, request_id: str, sha256: str) -> None:
+    """Store the content hash of a request's produced image (for dup detection)."""
+    with connect(settings) as connection:
+        connection.execute(
+            "UPDATE image_requests SET output_sha256 = ? WHERE id = ?",
+            (sha256, request_id),
+        )
+
+
+def output_sha_seen_before(
+    settings: Settings, sha256: str, *, exclude_request_id: str | None = None
+) -> str | None:
+    """Return an earlier request id that produced the same image content, else None.
+
+    An exact image-content match across two different requests is the signature of
+    the stale/duplicate bug (Codex handing back a prior image). Distinct prompts
+    never legitimately yield byte-identical images, so any match is a duplicate.
+    """
+    with connect(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT id FROM image_requests
+            WHERE output_sha256 = ? AND id != ?
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (sha256, exclude_request_id or ""),
+        ).fetchone()
+    return row[0] if row else None
 
 
 def mark_image_request_failed(
