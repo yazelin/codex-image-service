@@ -64,7 +64,9 @@ def _codex_home(explicit: str | None = None) -> Path:
     return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
 
-def _find_generated_in_session(stderr: str, codex_home: str | None = None) -> Path | None:
+def _find_generated_in_session(
+    stderr: str, codex_home: str | None = None, min_mtime: float = 0.0
+) -> Path | None:
     """Extract Codex's session id from stderr and locate the image_gen output.
 
     The built-in image_gen tool writes to
@@ -72,6 +74,12 @@ def _find_generated_in_session(stderr: str, codex_home: str | None = None) -> Pa
     In edit mode the model often skips the follow-up copy step, so we have to
     fish the file out ourselves. Pass the per-attempt codex_home — without it,
     multi-account runs look in the wrong tree and recovery silently fails.
+
+    ``min_mtime`` rejects any file older than the current request. CODEX_HOMEs
+    are shared and persistent, so without this guard a misparsed/reused session
+    id can surface a *previous* cat's image and we'd return it as success — the
+    duplicate-image bug. A stale file is strictly worse than no file (the caller
+    can fall back), so we only ever accept output created by this very run.
     """
     match = _SESSION_ID_RE.search(stderr or "")
     if not match:
@@ -84,7 +92,9 @@ def _find_generated_in_session(stderr: str, codex_home: str | None = None) -> Pa
         (
             p
             for p in session_dir.iterdir()
-            if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+            if p.is_file()
+            and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+            and p.stat().st_mtime >= min_mtime
         ),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
@@ -92,7 +102,9 @@ def _find_generated_in_session(stderr: str, codex_home: str | None = None) -> Pa
     return candidates[0] if candidates else None
 
 
-def _find_image_in_rollout(stderr: str, codex_home: str | None = None) -> bytes | None:
+def _find_image_in_rollout(
+    stderr: str, codex_home: str | None = None, min_mtime: float = 0.0
+) -> bytes | None:
     """Recover the generated image from the session rollout (Codex >= 0.141).
 
     Newer Codex no longer writes ``generated_images/<session_id>/*.png``; instead
@@ -100,6 +112,9 @@ def _find_image_in_rollout(stderr: str, codex_home: str | None = None) -> bytes 
     (``payload.result`` of the ``image_generation_end`` / ``image_generation_call``
     event). Locate the rollout by session id and decode the (last) image out of it.
     Returns the raw image bytes, or None if nothing recoverable is found.
+
+    ``min_mtime`` rejects rollout files not written by this request, so a
+    misparsed/reused session id can't hand back a previous cat's embedded image.
     """
     match = _SESSION_ID_RE.search(stderr or "")
     if not match:
@@ -109,7 +124,11 @@ def _find_image_in_rollout(stderr: str, codex_home: str | None = None) -> bytes 
     if not sessions_dir.is_dir():
         return None
     rollouts = sorted(
-        sessions_dir.rglob(f"*{session_id}.jsonl"),
+        (
+            p
+            for p in sessions_dir.rglob(f"*{session_id}.jsonl")
+            if p.stat().st_mtime >= min_mtime
+        ),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -312,6 +331,11 @@ class CodexImageGenerator:
         try:
             for index in range(count):
                 output_path = storage.generated_image_path(self.settings, request_id, index, count)
+                # Wall-clock stamp taken BEFORE the run. All image recovery below
+                # is gated on this so we never hand back a pre-existing (stale)
+                # image from a prior request that shares this CODEX_HOME — a
+                # genuine fresh output always post-dates it.
+                attempt_started = time.time()
                 command, stdout, stderr, picked_home = await self._run_codex_with_retry(
                     run_dir=run_dir,
                     output_path=output_path,
@@ -330,10 +354,11 @@ class CodexImageGenerator:
                     fallback = self._find_generated_image(
                         run_dir,
                         exclude=set(reference_paths),
+                        min_mtime=attempt_started,
                     )
                     if not fallback:
                         fallback = _find_generated_in_session(
-                            stderr, codex_home=codex_home_used
+                            stderr, codex_home=codex_home_used, min_mtime=attempt_started
                         )
                     if fallback:
                         shutil.copy2(fallback, output_path)
@@ -341,7 +366,7 @@ class CodexImageGenerator:
                         # Codex >= 0.141: no file on disk — the image is base64 in
                         # the session rollout. Decode it straight to output_path.
                         rollout_bytes = _find_image_in_rollout(
-                            stderr, codex_home=codex_home_used
+                            stderr, codex_home=codex_home_used, min_mtime=attempt_started
                         )
                         if rollout_bytes:
                             output_path.write_bytes(rollout_bytes)
@@ -598,7 +623,7 @@ class CodexImageGenerator:
         )
 
     def _find_generated_image(
-        self, run_dir: Path, exclude: set[Path] | None = None
+        self, run_dir: Path, exclude: set[Path] | None = None, min_mtime: float = 0.0
     ) -> Path | None:
         excluded = {p.resolve() for p in (exclude or set())}
         candidates = [
@@ -607,6 +632,7 @@ class CodexImageGenerator:
             if path.is_file()
             and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
             and path.resolve() not in excluded
+            and path.stat().st_mtime >= min_mtime
         ]
         if not candidates:
             return None
