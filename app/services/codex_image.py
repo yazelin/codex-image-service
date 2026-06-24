@@ -362,25 +362,28 @@ class CodexImageGenerator:
                 stdout_parts.append(stdout)
                 stderr_parts.append(stderr)
                 if not output_path.exists():
-                    fallback = self._find_generated_image(
-                        run_dir,
-                        exclude=set(reference_paths),
-                        min_mtime=attempt_started,
+                    # 復原順序:rollout 優先。Codex >= 0.141 把圖以 base64 放進 session
+                    # rollout(已不再寫 generated_images/<session>/*.png,本機自 2026-06-22
+                    # 起就停更),rollout 是「這次請求、這個 session」的權威且新鮮結果。
+                    # 舊的檔案 finder 會翻到 *別個 session 的舊圖*(就是把霓虹貓 #2239 當
+                    # #2263 送出的元兇),所以只在 rollout 真的沒東西時才退而求其次。
+                    rollout_bytes = _find_image_in_rollout(
+                        stderr, codex_home=codex_home_used, min_mtime=attempt_started
                     )
-                    if not fallback:
-                        fallback = _find_generated_in_session(
-                            stderr, codex_home=codex_home_used, min_mtime=attempt_started
-                        )
-                    if fallback:
-                        shutil.copy2(fallback, output_path)
+                    if rollout_bytes:
+                        output_path.write_bytes(rollout_bytes)
                     else:
-                        # Codex >= 0.141: no file on disk — the image is base64 in
-                        # the session rollout. Decode it straight to output_path.
-                        rollout_bytes = _find_image_in_rollout(
-                            stderr, codex_home=codex_home_used, min_mtime=attempt_started
+                        fallback = self._find_generated_image(
+                            run_dir,
+                            exclude=set(reference_paths),
+                            min_mtime=attempt_started,
                         )
-                        if rollout_bytes:
-                            output_path.write_bytes(rollout_bytes)
+                        if not fallback:
+                            fallback = _find_generated_in_session(
+                                stderr, codex_home=codex_home_used, min_mtime=attempt_started
+                            )
+                        if fallback:
+                            shutil.copy2(fallback, output_path)
                 if not output_path.exists():
                     raise CodexGenerationError(
                         f"Codex completed but did not create {output_path}",
