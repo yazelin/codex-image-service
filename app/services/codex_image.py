@@ -361,29 +361,34 @@ class CodexImageGenerator:
                 codex_home_used = picked_home
                 stdout_parts.append(stdout)
                 stderr_parts.append(stderr)
-                if not output_path.exists():
-                    # 復原順序:rollout 優先。Codex >= 0.141 把圖以 base64 放進 session
-                    # rollout(已不再寫 generated_images/<session>/*.png,本機自 2026-06-22
-                    # 起就停更),rollout 是「這次請求、這個 session」的權威且新鮮結果。
-                    # 舊的檔案 finder 會翻到 *別個 session 的舊圖*(就是把霓虹貓 #2239 當
-                    # #2263 送出的元兇),所以只在 rollout 真的沒東西時才退而求其次。
-                    rollout_bytes = _find_image_in_rollout(
-                        stderr, codex_home=codex_home_used, min_mtime=attempt_started
+                # Codex 0.141 emits the generated image as base64 in the session
+                # ROLLOUT, not as a file. The service prompt asks codex to copy the
+                # image to output_path, but with no fresh file on disk codex's copy
+                # step can grab a STALE file (a prior request's output still sitting in
+                # generated_dir) — verified 2026-06-25: a request's own rollout held the
+                # correct fresh image (sha bd156b01) yet output_path held the PREVIOUS
+                # request's image (sha d443b8b6). So the rollout is the authoritative
+                # result for THIS session: always prefer it and OVERWRITE whatever codex
+                # left at output_path. The `not output_path.exists()` gate used to skip
+                # this whenever codex's stale copy succeeded — that was the duplicate bug.
+                # Fall back to the legacy file finders only when the rollout has nothing.
+                rollout_bytes = _find_image_in_rollout(
+                    stderr, codex_home=codex_home_used, min_mtime=attempt_started
+                )
+                if rollout_bytes:
+                    output_path.write_bytes(rollout_bytes)
+                elif not output_path.exists():
+                    fallback = self._find_generated_image(
+                        run_dir,
+                        exclude=set(reference_paths),
+                        min_mtime=attempt_started,
                     )
-                    if rollout_bytes:
-                        output_path.write_bytes(rollout_bytes)
-                    else:
-                        fallback = self._find_generated_image(
-                            run_dir,
-                            exclude=set(reference_paths),
-                            min_mtime=attempt_started,
+                    if not fallback:
+                        fallback = _find_generated_in_session(
+                            stderr, codex_home=codex_home_used, min_mtime=attempt_started
                         )
-                        if not fallback:
-                            fallback = _find_generated_in_session(
-                                stderr, codex_home=codex_home_used, min_mtime=attempt_started
-                            )
-                        if fallback:
-                            shutil.copy2(fallback, output_path)
+                    if fallback:
+                        shutil.copy2(fallback, output_path)
                 if not output_path.exists():
                     raise CodexGenerationError(
                         f"Codex completed but did not create {output_path}",
