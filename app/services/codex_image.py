@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import signal
 import time
 from dataclasses import dataclass
@@ -361,37 +360,29 @@ class CodexImageGenerator:
                 codex_home_used = picked_home
                 stdout_parts.append(stdout)
                 stderr_parts.append(stderr)
-                # Codex 0.141 emits the generated image as base64 in the session
-                # ROLLOUT, not as a file. The service prompt asks codex to copy the
-                # image to output_path, but with no fresh file on disk codex's copy
-                # step can grab a STALE file (a prior request's output still sitting in
-                # generated_dir) — verified 2026-06-25: a request's own rollout held the
-                # correct fresh image (sha bd156b01) yet output_path held the PREVIOUS
-                # request's image (sha d443b8b6). So the rollout is the authoritative
-                # result for THIS session: always prefer it and OVERWRITE whatever codex
-                # left at output_path. The `not output_path.exists()` gate used to skip
-                # this whenever codex's stale copy succeeded — that was the duplicate bug.
-                # Fall back to the legacy file finders only when the rollout has nothing.
+                # Codex 0.141 is PINNED (Dockerfile: @openai/codex@0.141.0) and ALWAYS
+                # delivers the generated image as base64 in the session ROLLOUT — that is
+                # the one legitimate delivery path. The file-based paths are legacy /
+                # non-standard and only ever surface STALE images:
+                #   - codex's agent, told to "copy the image to output_path", finds no
+                #     fresh file on disk (0.141 writes none) and *sometimes* copies a
+                #     prior request's output from generated_dir instead — the intermittent
+                #     duplicate bug (verified 2026-06-25: own rollout had the fresh image
+                #     sha bd156b01 while output_path held the previous request's sha
+                #     d443b8b6). "sometimes" = the LLM agent's non-deterministic copy step.
+                #   - generated_images/<session>/*.png stopped being written 2026-06-22.
+                # So read ONLY from the rollout, discard whatever codex copied to
+                # output_path, and treat "no rollout image" as a genuine failure (codex
+                # refused/errored) so the caller (catime) falls back to gemini.
                 rollout_bytes = _find_image_in_rollout(
                     stderr, codex_home=codex_home_used, min_mtime=attempt_started
                 )
+                output_path.unlink(missing_ok=True)  # never trust codex's file copy (may be stale)
                 if rollout_bytes:
                     output_path.write_bytes(rollout_bytes)
-                elif not output_path.exists():
-                    fallback = self._find_generated_image(
-                        run_dir,
-                        exclude=set(reference_paths),
-                        min_mtime=attempt_started,
-                    )
-                    if not fallback:
-                        fallback = _find_generated_in_session(
-                            stderr, codex_home=codex_home_used, min_mtime=attempt_started
-                        )
-                    if fallback:
-                        shutil.copy2(fallback, output_path)
                 if not output_path.exists():
                     raise CodexGenerationError(
-                        f"Codex completed but did not create {output_path}",
+                        f"Codex returned no image in the session rollout for {output_path}",
                         stdout="\n".join(stdout_parts),
                         stderr="\n".join(stderr_parts),
                         command=command_display,
@@ -638,10 +629,11 @@ class CodexImageGenerator:
                 f"{constraint}\n"
                 f"Output size: {size}\n"
                 f"Quality: {quality}\n"
-                f"Save the resulting PNG image exactly at this path: {output_path.resolve()}\n"
-                "If image_gen writes the file elsewhere first, copy it to the "
-                "exact path above. Do not create or modify any other project "
-                "files. Final answer should only contain the saved image path."
+                "Do NOT save, copy, move, or search for any files on disk — make "
+                "exactly one image_gen call and stop. The service reads the image "
+                "from the codex session rollout, so no file work is needed (and "
+                "copying files would risk picking up a previous request's image). "
+                "Final answer can be brief."
             )
         return (
             "Call the built-in image_gen tool to create an image. "
@@ -655,10 +647,10 @@ class CodexImageGenerator:
             f"User prompt for {image_label}: {prompt}\n"
             f"Size: {size}\n"
             f"Quality: {quality}\n"
-            f"Save the final PNG image exactly at this path: {output_path.resolve()}\n"
-            "If image_gen writes the file elsewhere first, copy it to the exact "
-            "path above. Do not create or modify any other project files. "
-            "Final answer should only contain the saved image path."
+            "Do NOT save, copy, move, or search for any files on disk — make exactly "
+            "one image_gen call and stop. The service reads the image from the codex "
+            "session rollout, so no file work is needed (and copying files would risk "
+            "picking up a previous request's image). Final answer can be brief."
         )
 
     def _find_generated_image(
