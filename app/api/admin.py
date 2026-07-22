@@ -94,6 +94,11 @@ async def login(request: Request):
         httponly=True,
         samesite="lax",
         max_age=ttl_seconds,
+        # Without an explicit path, Starlette defaults to "/" — behind the
+        # shared ching-tech.ddns.net domain that collides with any other
+        # admin webui on the same host (e.g. gemini-web's), since both use
+        # the same cookie name. Scope it to this service's own prefix.
+        path=_prefix(request) or "/",
     )
     return response
 
@@ -101,7 +106,7 @@ async def login(request: Request):
 @router.post("/admin/logout", include_in_schema=False)
 async def logout(request: Request) -> RedirectResponse:
     response = RedirectResponse(_url(request, "/admin/login"), status_code=303)
-    response.delete_cookie("admin_session")
+    response.delete_cookie("admin_session", path=_prefix(request) or "/")
     return response
 
 

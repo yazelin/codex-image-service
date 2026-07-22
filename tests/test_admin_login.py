@@ -76,6 +76,34 @@ class AdminLoginTests(unittest.TestCase):
         self.assertEqual(remember_max_age, 30 * 86400)
         self.assertGreater(remember_max_age, default_max_age)
 
+    def test_session_cookie_scoped_to_url_prefix(self):
+        """Regression: without an explicit Path, the cookie defaults to "/"
+        and collides with any other admin webui sharing the same domain
+        (e.g. gemini-web's) — both use the cookie name "admin_session"."""
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        settings = _settings_for(Path(tmp.name))
+        settings = settings.__class__(**{**settings.__dict__, "admin_url_prefix": "/codex-image"})
+        app = FastAPI()
+        app.state.settings = settings
+        app.include_router(admin.router)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/admin/login",
+            data={"username": "admin", "password": "test-pass"},
+            follow_redirects=False,
+        )
+        self.assertEqual(_cookie_path(resp.headers["set-cookie"]), "/codex-image")
+
+
+def _cookie_path(set_cookie_header: str) -> str:
+    for part in set_cookie_header.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key.lower() == "path":
+            return value
+    raise AssertionError(f"no Path in Set-Cookie: {set_cookie_header}")
+
 
 def _cookie_max_age(set_cookie_header: str) -> int:
     for part in set_cookie_header.split(";"):
