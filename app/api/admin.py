@@ -88,6 +88,13 @@ async def login(request: Request):
     ttl_seconds = 30 * 86400 if remember else 86400
 
     response = RedirectResponse(_url(request, "/admin"), status_code=303)
+    # Any session cookie set before the Path scoping fix landed defaulted to
+    # Path=/ (root) — it still lives in returning browsers and coexists with
+    # the new Path-scoped one (different Path = different cookie in the jar),
+    # so the browser sends both and whichever one the server happens to read
+    # can be the stale/wrong one. Clear the old root-path cookie explicitly
+    # so only the correctly-scoped one survives.
+    response.delete_cookie("admin_session", path="/")
     response.set_cookie(
         "admin_session",
         create_admin_session(username, settings.admin_session_secret, ttl_seconds=ttl_seconds),

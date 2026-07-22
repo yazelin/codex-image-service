@@ -70,8 +70,8 @@ class AdminLoginTests(unittest.TestCase):
             data={"username": "admin", "password": "test-pass", "remember": "on"},
             follow_redirects=False,
         )
-        default_max_age = _cookie_max_age(default_resp.headers["set-cookie"])
-        remember_max_age = _cookie_max_age(remember_resp.headers["set-cookie"])
+        default_max_age = _cookie_max_age(_session_set_cookie(default_resp.headers))
+        remember_max_age = _cookie_max_age(_session_set_cookie(remember_resp.headers))
         self.assertEqual(default_max_age, 86400)
         self.assertEqual(remember_max_age, 30 * 86400)
         self.assertGreater(remember_max_age, default_max_age)
@@ -94,7 +94,30 @@ class AdminLoginTests(unittest.TestCase):
             data={"username": "admin", "password": "test-pass"},
             follow_redirects=False,
         )
-        self.assertEqual(_cookie_path(resp.headers["set-cookie"]), "/codex-image")
+        self.assertEqual(_cookie_path(_session_set_cookie(resp.headers)), "/codex-image")
+
+    def test_login_clears_stale_root_path_cookie(self):
+        """Login must also delete any pre-fix, unscoped (Path=/) admin_session
+        cookie still sitting in the browser — otherwise the browser sends both
+        and the server can end up reading the stale one."""
+        resp = self.client.post(
+            "/admin/login",
+            data={"username": "admin", "password": "test-pass"},
+            follow_redirects=False,
+        )
+        set_cookie_headers = resp.headers.get_list("set-cookie")
+        root_clears = [h for h in set_cookie_headers if _cookie_path(h) == "/" and 'admin_session=""' in h]
+        self.assertEqual(len(root_clears), 1)
+
+
+def _session_set_cookie(headers) -> str:
+    """Pick the Set-Cookie header that actually carries the session token
+    (non-empty value) — login also emits a same-named deletion cookie for
+    the old root path, see test_login_clears_stale_root_path_cookie."""
+    for h in headers.get_list("set-cookie"):
+        if h.startswith("admin_session=") and not h.startswith('admin_session=""'):
+            return h
+    raise AssertionError(f"no session-bearing Set-Cookie found: {headers.get_list('set-cookie')}")
 
 
 def _cookie_path(set_cookie_header: str) -> str:
