@@ -80,13 +80,20 @@ async def login(request: Request):
             status_code=401,
         )
 
+    # "Remember me" just widens the session TTL — 30 days vs. the default
+    # 24h — so the admin isn't re-typing the password every day. Not tied to
+    # browser password-manager saving, which already works via
+    # autocomplete="current-password" on the input.
+    remember = str(form.get("remember", "")) == "on"
+    ttl_seconds = 30 * 86400 if remember else 86400
+
     response = RedirectResponse(_url(request, "/admin"), status_code=303)
     response.set_cookie(
         "admin_session",
-        create_admin_session(username, settings.admin_session_secret),
+        create_admin_session(username, settings.admin_session_secret, ttl_seconds=ttl_seconds),
         httponly=True,
         samesite="lax",
-        max_age=86400,
+        max_age=ttl_seconds,
     )
     return response
 
@@ -788,6 +795,7 @@ def _login_form(prefix: str, error: str | None = None) -> str:
       <form method="post" action="{prefix}/admin/login">
         <label>Username<input name="username" autocomplete="username" required></label>
         <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+        <label class="remember-row"><input type="checkbox" name="remember"> Remember me for 30 days</label>
         <button type="submit" style="width: 100%">Sign in</button>
       </form>
     </div>
@@ -1314,6 +1322,11 @@ _STYLES = """
   }
   .login h1 { text-align: center; margin-bottom: 22px; font-size: 22px; }
   .login label { margin-bottom: 14px; }
+  .login label.remember-row {
+    display: flex; flex-direction: row; align-items: center; gap: 8px;
+    font-size: 13.5px; color: var(--ink-soft); font-weight: 500;
+  }
+  .login label.remember-row input { width: auto; }
   .login-brand {
     display: flex; align-items: center; gap: 14px;
     margin-bottom: 26px;
