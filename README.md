@@ -290,7 +290,11 @@ at `/host_codex_homes/<name>` inside the container. Restart with
 `docker compose up -d --build` and the rotation kicks in.
 
 The admin Overview shows one card per account with a 30-day request
-count, success/failure split, auth-token freshness (green ≤6d, amber
+count, success/failure split, a **24h success rate** (the 30-day total
+dilutes an account that only started failing this morning; consumers
+like catime fail over to gemini on error, so a dead account still looks
+like "images are coming out" from the outside — this number is the only
+place it shows), auth-token freshness (green ≤6d, amber
 7–9d, red ≥10d since `last_refresh`), and the first 8 chars of the
 ChatGPT `account_id` so you can tell which is which. The History page
 gains an Account column with the chosen home (tooltip shows the full

@@ -283,6 +283,8 @@ def _overview_page(settings: Any, prefix: str) -> str:
     stats = db.dashboard_stats(settings)
     recent = db.list_image_requests(settings, limit=10)
     per_account = db.per_account_stats(settings, days=30)
+    # 30 天的總量會把「今天早上才開始壞」稀釋掉；24h 那欄才抓得到現在的死活。
+    per_account_24h = db.per_account_stats(settings, days=1)
     homes_configured = getattr(settings, "codex_homes", ()) or ()
     body = f"""
       <div class="page-head">
@@ -295,7 +297,7 @@ def _overview_page(settings: Any, prefix: str) -> str:
         <div><strong>{stats['request_count']}</strong><span>Requests</span></div>
         <div><strong>{stats['queued_count']}</strong><span>Queued / running</span></div>
       </section>
-      {_codex_accounts_section(homes_configured, per_account)}
+      {_codex_accounts_section(homes_configured, per_account, per_account_24h)}
       <section>
         <div class="section-title">
           <h2>Recent activity</h2>
@@ -310,6 +312,7 @@ def _overview_page(settings: Any, prefix: str) -> str:
 def _codex_accounts_section(
     homes_configured: tuple[str, ...],
     per_account: list[dict[str, Any]],
+    per_account_24h: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a card per Codex account in use, with usage stats + auth health.
 
@@ -330,19 +333,22 @@ def _codex_accounts_section(
         return ""
 
     by_path = {row["codex_home"]: row for row in per_account}
+    by_path_24h = {row["codex_home"]: row for row in (per_account_24h or [])}
 
     cards = []
     seen: set[str] = set()
     for home in effective_homes:
         seen.add(home)
         stats = by_path.get(home, {"total": 0, "succeeded": 0, "failed": 0, "last_seen": None})
-        cards.append(_codex_account_card(home, stats, configured=True))
+        cards.append(_codex_account_card(home, stats, configured=True,
+                                         stats_24h=by_path_24h.get(home)))
 
     # also show any historical homes that appeared in DB but aren't currently configured
     for row in per_account:
         h = row.get("codex_home") or ""
         if h and h not in seen:
-            cards.append(_codex_account_card(h, row, configured=False))
+            cards.append(_codex_account_card(h, row, configured=False,
+                                             stats_24h=by_path_24h.get(h)))
 
     multi = len(effective_homes) > 1
     subtitle = (
@@ -383,11 +389,28 @@ def _decode_access_token_exp(access_token: str) -> datetime | None:
         return None
 
 
+def _success_rate_24h(stats: dict[str, Any] | None) -> str:
+    """近 24 小時成功率。沒流量顯示 —，不是 0%（0/0 誤報成掛掉比沒有這欄還糟）。
+
+    存在理由跟 gemini-web 那張表一樣：消費端（catime）在 codex 回錯誤時會自動
+    改走 gemini，所以單一帳號整條壞掉時，外面看起來仍然「有圖」，只有這裡看得到。
+    """
+    if not stats:
+        return "—"
+    ok = int(stats.get("succeeded") or 0)
+    failed = int(stats.get("failed") or 0)
+    total = ok + failed
+    if total == 0:
+        return "—"
+    return f"{round(100 * ok / total)}%"
+
+
 def _codex_account_card(
     home_path: str,
     stats: dict[str, Any],
     *,
     configured: bool,
+    stats_24h: dict[str, Any] | None = None,
 ) -> str:
     """One CODEX_HOME → one card. Reads auth.json for last_refresh, account_id,
     and the access_token's actual JWT `exp`. Health chip + expiry text are
@@ -473,6 +496,7 @@ def _codex_account_card(
           <div><strong>{total}</strong><span>Requests</span></div>
           <div><strong>{succeeded}</strong><span>Succeeded</span></div>
           <div><strong>{failed}</strong><span>Failed</span></div>
+          <div><strong>{_success_rate_24h(stats_24h)}</strong><span>24h success</span></div>
         </div>
         <div class="account-footer">
           <span>Auth: {auth_status}</span>
