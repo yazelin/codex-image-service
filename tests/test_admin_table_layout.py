@@ -29,3 +29,13 @@ def test_stats_row_is_not_hardcoded_to_four():
     """Overview 有 5 格（含 Uptime）；寫死 4 欄會把第 5 格擠到下一行。"""
     assert "repeat(auto-fit, minmax(180px, 1fr))" in admin._STYLES
     assert "repeat(4, minmax(0, 1fr))" not in admin._STYLES
+
+
+def test_account_stats_is_not_hardcoded_to_three():
+    """帳號卡現在有 4 格（Requests / Succeeded / Failed / 24h success）。
+
+    寫死 3 欄會讓第 4 格自己佔一整排。auto-fit 搭 120px 下限：卡片夠寬時
+    四格一列，窄的時候掉成 2×2 而不是 3+1。
+    """
+    assert "repeat(auto-fit, minmax(120px, 1fr))" in admin._STYLES
+    assert "repeat(3, minmax(0, 1fr))" not in admin._STYLES
