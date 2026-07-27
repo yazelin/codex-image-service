@@ -209,6 +209,20 @@ class CodexGenerationResult:
     codex_home: str | None = None
 
 
+DISPATCH_MODES = ("round-robin", "primary-first")
+DISPATCH_MODE_KEY = "dispatch_mode"
+
+
+def dispatch_mode(settings) -> str:
+    """目前的帳號輪替模式；讀不到或值不合法一律回預設的 round-robin
+    （壞掉的設定不該讓生圖整條停擺）。"""
+    try:
+        mode = db.get_setting(settings, DISPATCH_MODE_KEY, "round-robin")
+    except Exception:
+        return "round-robin"
+    return mode if mode in DISPATCH_MODES else "round-robin"
+
+
 class CodexImageGenerator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -259,14 +273,22 @@ class CodexImageGenerator:
                 await loop.run_in_executor(None, _flock_release, fd)
 
     async def _claim_primary_base(self) -> int:
-        """Reserve the next round-robin slot for one request.
+        """Reserve the slot this request's PRIMARY attempt should use.
 
-        Returns the index this request's PRIMARY attempt should use; the
-        cursor is bumped exactly once per request, regardless of how many
-        retry attempts follow. Empty homes → returns 0 (caller ignores it).
+        兩種模式（admin Overview 可即時切，比照 gemini-web 的 dispatch mode）：
+
+        - ``round-robin``（預設）：cursor 每筆請求前進一格，把用量平均攤在各
+          ChatGPT 帳號上，誰都不會先撞到額度上限。
+        - ``primary-first``：一律從第一個帳號開始，其餘只在它失敗時由 retry
+          接手（``_home_for_attempt`` 的 attempt_index）。想把備用帳號的額度
+          留著、或某個帳號方案比較好時用這個。
+
+        cursor 一筆請求只前進一次，retry 不會重複推進。空 homes → 回 0。
         """
         homes = self.settings.codex_homes
         if not homes:
+            return 0
+        if dispatch_mode(self.settings) == "primary-first":
             return 0
         async with self._home_lock:
             base = self._home_cursor

@@ -289,6 +289,15 @@ so any subdirectory you create under `~/codex-homes/` becomes available
 at `/host_codex_homes/<name>` inside the container. Restart with
 `docker compose up -d --build` and the rotation kicks in.
 
+When more than one account is configured, the Overview also carries a
+**Dispatch mode** switch (stored in the DB, survives restarts):
+
+- `round-robin` (default) — every request advances to the next account, so
+  usage spreads evenly and no single ChatGPT plan hits its cap first.
+- `primary-first` — always start on the first account; the others only get
+  used when it fails (the retry steps to the next one). Use this to keep a
+  backup account's quota untouched, or when one account is on a better plan.
+
 The admin Overview shows one card per account with a 30-day request
 count, success/failure split, a **24h success rate** (the 30-day total
 dilutes an account that only started failing this morning; consumers
