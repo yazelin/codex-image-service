@@ -38,4 +38,7 @@ def test_account_stats_is_not_hardcoded_to_three():
     四格一列，窄的時候掉成 2×2 而不是 3+1。
     """
     assert "repeat(auto-fit, minmax(120px, 1fr))" in admin._STYLES
-    assert "repeat(3, minmax(0, 1fr))" not in admin._STYLES
+    # .form-row-3（Test 頁的三欄輸入列）本來就該是固定 3 欄，別誤傷；
+    # 只確認 .account-stats 那條規則自己不是寫死的。
+    block = admin._STYLES[admin._STYLES.index(".account-stats {"):]
+    assert "repeat(3," not in block[: block.index("}")]
