@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -11,6 +12,11 @@ from app.config import get_settings
 from app.services.cleanup import CleanupService
 from app.services.job_queue import ImageJobQueue
 from app.services.storage import ensure_storage
+
+
+# 服務啟動時間。Overview 的 Uptime 用它 —— 姊妹服務 gemini-web 早就有這格，
+# 判「這台是不是剛被重啟過」時很常用（例如帳號 UI 變體修好後要確認生效）。
+_START_TIME = time.time()
 
 
 @asynccontextmanager
