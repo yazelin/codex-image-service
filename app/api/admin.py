@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -279,7 +280,24 @@ async def cleanup(request: Request):
 # page renderers
 # ---------------------------------------------------------------------------
 
+def _format_uptime(seconds: float) -> str:
+    """跟 gemini-web 的 Overview 對齊的寫法：1d 4h / 4h 12m / 12m 30s。"""
+    seconds = int(max(0, seconds))
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
 def _overview_page(settings: Any, prefix: str) -> str:
+    from app.main import _START_TIME  # deferred: app.main imports this module
+
     stats = db.dashboard_stats(settings)
     recent = db.list_image_requests(settings, limit=10)
     per_account = db.per_account_stats(settings, days=30)
@@ -296,6 +314,7 @@ def _overview_page(settings: Any, prefix: str) -> str:
         <div><strong>{stats['active_key_count']}</strong><span>Active keys</span></div>
         <div><strong>{stats['request_count']}</strong><span>Requests</span></div>
         <div><strong>{stats['queued_count']}</strong><span>Queued / running</span></div>
+        <div><strong>{_format_uptime(time.time() - _START_TIME)}</strong><span>Uptime</span></div>
       </section>
       {_codex_accounts_section(homes_configured, per_account, per_account_24h)}
       <section>
@@ -769,6 +788,11 @@ def _requests_table(requests: list[dict[str, Any]], settings: Any) -> str:
         error = item.get("error") or ""
         if len(error) > 180:
             error = error[:177] + "..."
+        # 摘要就把重點露出來，不用每筆都點開 <details>：prompt 看得出是哪一張、
+        # error 看得出是哪一類失敗（逾時 / 拒絕 / 重複圖），要全文再展開。
+        prompt_full = item.get("prompt") or ""
+        prompt_peek = _peek(prompt_full, 90)
+        error_peek = _peek(error, 90)
         delete_form = (
             f"<form method='post' action='{prefix}/admin/image-requests/"
             f"{html.escape(item['id'])}/delete' style='display:inline'"
@@ -787,8 +811,12 @@ def _requests_table(requests: list[dict[str, Any]], settings: Any) -> str:
             f"<td>{_relative_time(item['created_at'])}</td>"
             f"<td>{_relative_time(item['expires_at'])}</td>"
             f"<td>{', '.join(links) or '—'}</td>"
-            f"<td><details><summary>Prompt</summary><pre>{html.escape(item['prompt'])}</pre></details></td>"
-            f"<td><details><summary>Error</summary><pre>{html.escape(error) or '—'}</pre></details></td>"
+            f"<td class='cell-peek'><details><summary>{html.escape(prompt_peek) or 'Prompt'}</summary>"
+            f"<pre>{html.escape(prompt_full)}</pre></details></td>"
+            f"<td class='cell-peek'>" + (
+                f"<details><summary class='summary-error'>{html.escape(error_peek)}</summary>"
+                f"<pre>{html.escape(error)}</pre></details>" if error else "—"
+            ) + "</td>"
             f"<td>{delete_form}</td>"
             "</tr>"
         )
@@ -803,6 +831,14 @@ def _requests_table(requests: list[dict[str, Any]], settings: Any) -> str:
         + "".join(rows)
         + "</tbody></table>"
     )
+
+
+def _peek(text: str, limit: int) -> str:
+    """摘要用的單行預覽：把換行壓掉再截斷，太長補省略號。"""
+    one_line = " ".join((text or "").split())
+    if len(one_line) <= limit:
+        return one_line
+    return one_line[: limit - 1] + "…"
 
 
 def _short_home_label(home_path: str) -> str:
@@ -1166,6 +1202,23 @@ _STYLES = """
   tbody tr:hover { background: #fff8f9; }
   td.actions { white-space: nowrap; }
   td.empty { text-align: center; color: var(--muted); padding: 32px 12px; }
+  /* 表格裡的按鈕用小一號的尺寸：原本沿用全域 pill(10px 22px / 14px)，在
+     13.5px 的表格裡整整佔掉兩行高，而那一格只有一顆按鈕，空的那行純浪費。 */
+  td button { padding: 5px 14px; font-size: 12.5px; box-shadow: none; }
+  td form { margin: 0; }
+
+  /* History 的 Prompt / Error 欄：摘要行直接顯示前 90 字，要全文再展開 */
+  td.cell-peek { max-width: 320px; }
+  td.cell-peek summary {
+    cursor: pointer; color: var(--ink-soft);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  td.cell-peek summary:hover { color: var(--ink); }
+  td.cell-peek summary.summary-error { color: var(--danger); }
+  td.cell-peek pre {
+    white-space: pre-wrap; word-break: break-word;
+    margin: 8px 0 0; font-size: 12px;
+  }
 
   /* ---- codex accounts grid ---- */
   .account-grid {
