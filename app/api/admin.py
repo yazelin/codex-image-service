@@ -1147,7 +1147,9 @@ _STYLES = """
   /* ---- stats ---- */
   .stats {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    /* 寫死 4 欄的話，第 5 格（Uptime）會被擠到下一行自己佔滿整排。改成
+       auto-fit：容器放寬後五格一列排得下，以後增減格子也不必再改這裡。 */
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 14px;
     background: transparent;
     border: 0;

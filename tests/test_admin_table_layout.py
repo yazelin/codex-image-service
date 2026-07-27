@@ -23,3 +23,9 @@ def test_mode_form_has_its_own_css():
     assert ".mode-form {" in admin._STYLES
     assert ".mode-form select" in admin._STYLES
     assert ".mode-form label" in admin._STYLES
+
+
+def test_stats_row_is_not_hardcoded_to_four():
+    """Overview 有 5 格（含 Uptime）；寫死 4 欄會把第 5 格擠到下一行。"""
+    assert "repeat(auto-fit, minmax(180px, 1fr))" in admin._STYLES
+    assert "repeat(4, minmax(0, 1fr))" not in admin._STYLES
