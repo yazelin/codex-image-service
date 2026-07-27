@@ -12,12 +12,30 @@ import base64
 import struct
 import unittest
 import zlib
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch, AsyncMock
 
+from app import db
 from app.config import Settings
 from app.services.codex_image import CodexImageGenerator, _detect_image_ext
+
+
+@contextmanager
+def _rollout_returns_image():
+    """讓 generate() 拿得到圖。
+
+    PR#12 之後 generate() 只認 session rollout 裡的 base64（不再相信 codex 自己
+    複製到 output_path 的檔案，那是重複圖 bug 的來源），rollout 沒圖就一律當
+    真失敗。下面這些測試測的是 argv／instruction／round-robin，不是回收路徑，
+    所以直接讓 rollout 交回一張合法 PNG。
+    """
+    with patch(
+        "app.services.codex_image._find_image_in_rollout",
+        return_value=_make_png_bytes(),
+    ):
+        yield
 
 
 def _make_png_bytes() -> bytes:
@@ -39,7 +57,10 @@ def _make_png_bytes() -> bytes:
 
 
 def _settings_for(workdir: Path, generated: Path, homes: tuple[str, ...] = ()) -> Settings:
-    return Settings(
+    """generate() 收尾會查內容雜湊去重（PR#9），那要求 image_requests 表存在，
+    所以這裡順手把 schema 建起來 —— 否則測 argv 的用例會死在 sqlite
+    'no such table'，跟它想測的東西毫無關係。"""
+    settings = Settings(
         admin_username="admin",
         admin_password="x",
         admin_session_secret="x",
@@ -56,6 +77,8 @@ def _settings_for(workdir: Path, generated: Path, homes: tuple[str, ...] = ()) -
         image_retention_days=7,
         cleanup_interval_hours=6,
     )
+    db.init_db(settings)
+    return settings
 
 
 class DetectExt(unittest.TestCase):
@@ -105,7 +128,7 @@ class EditModeRouting(unittest.TestCase):
                 captured["instruction"] = gen._instruction(**captured["instruction_kwargs"])
                 return ("fake-cmd", "fake-stdout", "fake-stderr")
 
-            with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+            with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run), _rollout_returns_image():
                 asyncio.run(
                     gen.generate(
                         request_id=request_id,
@@ -180,7 +203,7 @@ class EditModeRouting(unittest.TestCase):
                 captured["reference_paths"] = list(reference_paths)
                 return ("fake-cmd", "", "")
 
-            with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+            with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run), _rollout_returns_image():
                 asyncio.run(
                     gen.generate(
                         request_id="img_text",
@@ -273,7 +296,7 @@ class RoundRobinHomes(unittest.TestCase):
             homes=("/h/a", "/h/b"),
             fake_run_side_effect=[("cmd", "out", "err")] * 3,
         )
-        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run), _rollout_returns_image():
             for _ in range(3):
                 asyncio.run(gen.generate(
                     request_id=f"img_rr_{_}",
@@ -288,7 +311,7 @@ class RoundRobinHomes(unittest.TestCase):
             homes=(),
             fake_run_side_effect=[("cmd", "out", "err")],
         )
-        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run), _rollout_returns_image():
             asyncio.run(gen.generate(
                 request_id="img_none", prompt="x",
                 size="1024x1024", quality="medium", count=1,
@@ -305,7 +328,7 @@ class RoundRobinHomes(unittest.TestCase):
                 ("cmd", "out-b", "err-b"),  # B succeeds
             ],
         )
-        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run), _rollout_returns_image():
             result = asyncio.run(gen.generate(
                 request_id="img_retry", prompt="x",
                 size="1024x1024", quality="medium", count=1,
@@ -324,7 +347,7 @@ class RoundRobinHomes(unittest.TestCase):
                 CodexGenerationError("B 401", stderr="B failed"),
             ],
         )
-        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run), _rollout_returns_image():
             with self.assertRaises(CodexGenerationError):
                 asyncio.run(gen.generate(
                     request_id="img_double_fail", prompt="x",
@@ -340,7 +363,7 @@ class RoundRobinHomes(unittest.TestCase):
                 CodexGenerationError("only one fails", stderr="alone"),
             ],
         )
-        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+        with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run), _rollout_returns_image():
             with self.assertRaises(CodexGenerationError):
                 asyncio.run(gen.generate(
                     request_id="img_single", prompt="x",
@@ -393,7 +416,7 @@ class MultiImageRouting(unittest.TestCase):
                 )
                 return ("fake-cmd", "fake-stdout", "fake-stderr")
 
-            with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run):
+            with patch.object(CodexImageGenerator, "_run_codex_once", new=fake_run), _rollout_returns_image():
                 asyncio.run(
                     gen.generate(
                         request_id=request_id,
@@ -486,7 +509,7 @@ class CodexArgvBuilder(unittest.TestCase):
                 return FakeProc()
 
             png_b64 = base64.b64encode(_make_png_bytes()).decode("ascii")
-            with patch("asyncio.create_subprocess_exec", new=fake_exec):
+            with patch("asyncio.create_subprocess_exec", new=fake_exec), _rollout_returns_image():
                 asyncio.run(
                     gen.generate(
                         request_id="img_argv",
