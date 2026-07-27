@@ -802,12 +802,12 @@ def _api_keys_table(keys: list[dict[str, Any]], prefix: str) -> str:
             "No API keys yet. Use the form above to create your first one.</td></tr>"
         )
     return (
-        "<table><thead><tr>"
+        "<div class='table-wrap'><table><thead><tr>"
         "<th title='Admin reference ID — not the bearer key. The bearer key (cimg_*) was only shown once at creation.'>Handle</th>"
         "<th>Name</th><th>Status</th><th>Requests</th>"
         "<th>Last used</th><th>Action</th></tr></thead><tbody>"
         + "".join(rows)
-        + "</tbody></table>"
+        + "</tbody></table></div>"
     )
 
 
@@ -859,13 +859,13 @@ def _requests_table(requests: list[dict[str, Any]], settings: Any) -> str:
     if not rows:
         rows.append("<tr><td colspan='10' class='empty'>No image requests yet.</td></tr>")
     return (
-        "<table><thead><tr><th>ID</th><th>Status</th><th>Key</th>"
+        "<div class='table-wrap'><table><thead><tr><th>ID</th><th>Status</th><th>Key</th>"
         "<th title='Which CODEX_HOME (ChatGPT account) ran this request'>Account</th>"
         "<th>Created</th>"
         "<th title='Auto-deleted after this time by the scheduled cleanup'>Expires</th>"
         "<th>Images</th><th>Prompt</th><th>Error</th><th>Action</th></tr></thead><tbody>"
         + "".join(rows)
-        + "</tbody></table>"
+        + "</tbody></table></div>"
     )
 
 
@@ -1126,7 +1126,9 @@ _STYLES = """
   }
   .nav-item.active .nav-ico { background: var(--accent-1); color: white; }
 
-  .content { padding: 32px 36px 64px; max-width: 1180px; }
+  /* History 欄位多，1180px 塞不下就整片爆出版面。放寬到 1600，仍不夠時由
+     .table-wrap 接手橫向捲動。 */
+  .content { padding: 32px 36px 64px; max-width: 1600px; }
   .page-head { margin-bottom: 24px; }
   .page-head h2 { font-size: 26px; margin: 0 0 6px; }
   .page-sub { margin: 0; color: var(--muted); font-size: 14.5px; }
@@ -1167,6 +1169,10 @@ _STYLES = """
   /* ---- section title row ---- */
   .section-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
   .section-title h2 { margin: 0; }
+
+  /* 表格一律包一層可橫向捲動的容器：欄位再多也只有表格自己捲，版面不會被撐破 */
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-wrap table { min-width: 100%; }
 
   /* Dispatch mode 切換器塞在 section 標題列，別把標題撐開 */
   .mode-form { display: flex; align-items: center; gap: 10px; margin: 0; }
