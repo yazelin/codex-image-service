@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app import db
+from app.services import codex_image
 from app.models import ImageGenerateRequest
 from app.security import constant_equals, create_admin_session, verify_admin_session
 from app.services.job_queue import GenerationQueueUnavailable
@@ -200,6 +201,18 @@ async def delete_api_key(request: Request, key_id: str) -> RedirectResponse:
     return RedirectResponse(_url(request, "/admin/keys"), status_code=303)
 
 
+@router.post("/admin/dispatch-mode", include_in_schema=False)
+async def set_dispatch_mode(request: Request) -> RedirectResponse:
+    """切換帳號輪替模式（存進 DB，重啟後沿用）。比照 gemini-web 的 dispatch mode。"""
+    if not _admin_user(request):
+        return _redirect_login(request)
+    form = await request.form()
+    mode = str(form.get("mode", ""))
+    if mode in codex_image.DISPATCH_MODES:
+        db.set_setting(request.app.state.settings, codex_image.DISPATCH_MODE_KEY, mode)
+    return RedirectResponse(_url(request, "/admin"), status_code=303)
+
+
 @router.post("/admin/image-requests/{request_id}/delete", include_in_schema=False)
 async def delete_image_request(request: Request, request_id: str) -> RedirectResponse:
     if not _admin_user(request):
@@ -303,6 +316,7 @@ def _overview_page(settings: Any, prefix: str) -> str:
     per_account = db.per_account_stats(settings, days=30)
     # 30 天的總量會把「今天早上才開始壞」稀釋掉；24h 那欄才抓得到現在的死活。
     per_account_24h = db.per_account_stats(settings, days=1)
+    current_mode = codex_image.dispatch_mode(settings)
     homes_configured = getattr(settings, "codex_homes", ()) or ()
     body = f"""
       <div class="page-head">
@@ -316,7 +330,7 @@ def _overview_page(settings: Any, prefix: str) -> str:
         <div><strong>{stats['queued_count']}</strong><span>Queued / running</span></div>
         <div><strong>{_format_uptime(time.time() - _START_TIME)}</strong><span>Uptime</span></div>
       </section>
-      {_codex_accounts_section(homes_configured, per_account, per_account_24h)}
+      {_codex_accounts_section(homes_configured, per_account, per_account_24h, prefix, current_mode)}
       <section>
         <div class="section-title">
           <h2>Recent activity</h2>
@@ -328,10 +342,30 @@ def _overview_page(settings: Any, prefix: str) -> str:
     return _shell("Overview", "overview", prefix, body)
 
 
+_DISPATCH_MODE_LABELS = {
+    "round-robin": "Round-robin — 每筆請求換下一個帳號，用量平均攤開",
+    "primary-first": "Primary-first — 固定用第一個帳號，失敗才換下一個",
+}
+
+
+def _dispatch_mode_form(prefix: str, current: str) -> str:
+    opts = "".join(
+        f"<option value='{m}'{' selected' if m == current else ''}>{html.escape(label)}</option>"
+        for m, label in _DISPATCH_MODE_LABELS.items()
+    )
+    return (
+        f"<form method='post' action='{prefix}/admin/dispatch-mode' class='mode-form'>"
+        f"<label>Dispatch mode <select name='mode'>{opts}</select></label> "
+        "<button type='submit'>Apply</button></form>"
+    )
+
+
 def _codex_accounts_section(
     homes_configured: tuple[str, ...],
     per_account: list[dict[str, Any]],
     per_account_24h: list[dict[str, Any]] | None = None,
+    prefix: str = "",
+    current_mode: str = "round-robin",
 ) -> str:
     """Render a card per Codex account in use, with usage stats + auth health.
 
@@ -376,11 +410,13 @@ def _codex_accounts_section(
         else "last 30 days · single-account mode"
     )
 
+    mode_form = _dispatch_mode_form(prefix, current_mode) if multi else ""
     return f"""
       <section>
         <div class="section-title">
           <h2>Codex accounts</h2>
           <span class="muted" style="font-size: 13px">{subtitle}</span>
+          {mode_form}
         </div>
         <div class="account-grid">{''.join(cards)}</div>
       </section>
@@ -1131,6 +1167,12 @@ _STYLES = """
   /* ---- section title row ---- */
   .section-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
   .section-title h2 { margin: 0; }
+
+  /* Dispatch mode 切換器塞在 section 標題列，別把標題撐開 */
+  .mode-form { display: flex; align-items: center; gap: 10px; margin: 0; }
+  .mode-form label { display: flex; align-items: center; gap: 8px; margin: 0; white-space: nowrap; }
+  .mode-form select { width: auto; min-width: 260px; }
+  .mode-form button { padding: 6px 16px; font-size: 12.5px; box-shadow: none; }
 
   /* ---- inline form (single input + button) ---- */
   .inline { display: flex; gap: 10px; align-items: stretch; }

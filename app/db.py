@@ -43,6 +43,11 @@ def init_db(settings: Settings | None = None) -> None:
                 requests_count INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS image_requests (
                 id TEXT PRIMARY KEY,
                 api_key_id TEXT,
@@ -352,6 +357,23 @@ def list_expired_image_requests(
             (before_iso, limit),
         ).fetchall()
     return [_decode_request_row(row) for row in rows]
+
+
+def get_setting(settings: Settings, key: str, default: str = "") -> str:
+    with connect(settings) as connection:
+        row = connection.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (key,)
+        ).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(settings: Settings, key: str, value: str) -> None:
+    with connect(settings) as connection:
+        connection.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
 
 def per_account_stats(settings: Settings, days: int = 30) -> list[dict[str, Any]]:
