@@ -1299,7 +1299,10 @@ _STYLES = """
   }
   .account-stats {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    /* 卡片裡現在有 4 格（Requests / Succeeded / Failed / 24h success），
+       寫死 3 欄會讓第 4 格自己佔一整排。auto-fit + 120px 下限：卡片夠寬時
+       四格一列，窄的時候直接掉成 2×2（而不是難看的 3+1）。 */
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     gap: 8px;
   }
   .account-stats > div {
