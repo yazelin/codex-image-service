@@ -4,6 +4,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import db
@@ -45,6 +46,15 @@ async def lifespan(app: FastAPI):
 
 settings = get_settings()
 app = FastAPI(title="Codex Image Web Service", version="0.1.0", lifespan=lifespan)
+if settings.cors_allow_origins:
+    # 讓純前端網頁(例如 comic-studio)可直接從瀏覽器打 /v1/*。
+    # 未設 CORS_ALLOW_ORIGINS 時完全不掛,行為與過去一致。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.cors_allow_origins),
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 app.mount("/generated", StaticFiles(directory=settings.generated_dir, check_dir=False), name="generated")
 app.include_router(public.router)
 app.include_router(admin.router)

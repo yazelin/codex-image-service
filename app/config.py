@@ -43,6 +43,7 @@ class Settings:
     request_wait_timeout_seconds: int
     image_retention_days: int
     cleanup_interval_hours: int
+    cors_allow_origins: tuple[str, ...] = ()  # () = 不掛 CORS middleware,維持既有行為
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -67,6 +68,11 @@ class Settings:
             request_wait_timeout_seconds=_int_env("REQUEST_WAIT_TIMEOUT_SECONDS", 600),
             image_retention_days=_int_env("IMAGE_RETENTION_DAYS", 7),
             cleanup_interval_hours=_int_env("CLEANUP_INTERVAL_HOURS", 6),
+            cors_allow_origins=tuple(
+                o.strip().rstrip("/")
+                for o in (os.getenv("CORS_ALLOW_ORIGINS") or "").split(",")
+                if o.strip()
+            ),
         )
 
     @property
