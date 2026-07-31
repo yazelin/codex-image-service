@@ -284,10 +284,12 @@ Then add to `.env` (paths as visible inside the container):
 CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
 ```
 
-`docker-compose.yml` already mounts `~/codex-homes:/host_codex_homes:ro`,
+`docker-compose.yml` already mounts `~/codex-homes:/host_codex_homes`
+read-write (codex writes sessions and rotates tokens inside `CODEX_HOME`),
 so any subdirectory you create under `~/codex-homes/` becomes available
-at `/host_codex_homes/<name>` inside the container. Restart with
-`docker compose up -d --build` and the rotation kicks in.
+at `/host_codex_homes/<name>` inside the container. An `.env`-only change
+needs just `docker compose up -d` to take effect; the rotation kicks in
+once the container is recreated.
 
 When more than one account is configured, the Overview also carries a
 **Dispatch mode** switch (stored in the DB, survives restarts):
