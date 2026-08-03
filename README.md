@@ -311,15 +311,38 @@ ChatGPT `account_id` so you can tell which is which. The History page
 gains an Account column with the chosen home (tooltip shows the full
 path).
 
-**Token refresh maintenance:** access tokens expire after ~10 days; the
-auth.json files are mounted read-only, so the container can't refresh
-them. Use codex periodically from the host with each home (or set up
-a small cron) to keep them fresh:
+**Token refresh maintenance:** access tokens live ~10 days (240h) and the
+pool homes are mounted read-write, so codex refreshes them in place —
+whichever process (a generation or the keepalive) runs first once the token
+needs rotating does it. A daily keepalive keeps idle accounts warm:
 
 ```bash
-# weekly cron — touches each home to trigger a refresh
-for h in ~/codex-homes/*/; do CODEX_HOME="$h" codex --version >/dev/null; done
+# daily cron — touches each home under the same lock the service uses
+0 4 * * * ~/codex-homes/refresh-tokens.sh >> ~/codex-homes/refresh-tokens.log 2>&1
 ```
+
+**Never point a home at a read-only auth.json.** Codex rotates the refresh
+token with the server and then writes it back; if the write can't land, the
+next run presents a token the server already retired, which is reuse. Reuse
+does not just kill that one home — OpenAI revokes every session belonging to
+that ChatGPT **user**, so two homes logged in as the same user die together
+(observed 2026-08-01: `refresh_token_invalidated` /
+`"Your session has ended. Please log in again."` across both of one user's
+homes within the same hour). Corollary for capacity planning: multiple homes
+on one ChatGPT user share a failure domain even when they sit in different
+workspaces.
+
+**Token audit trail:** every run fingerprints the home's `auth.json` before
+and after (sha256 prefix of the refresh token — never the token itself) and
+appends a line to `data/token-audit.log` when it rotated, or when a run was
+killed on timeout. Grep it first when accounts start failing auth:
+
+```bash
+grep '"rotated": true' data/token-audit.log | tail
+```
+
+A `timeout_kill` entry with `"rotated": true` is the dangerous case: the run
+was killed across a rotation, so the home may be holding a retired token.
 
 ## Troubleshooting
 

@@ -7,6 +7,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import signal
@@ -19,7 +20,17 @@ from app.config import Settings
 from app.services import storage
 
 
+logger = logging.getLogger(__name__)
+
 _SESSION_ID_RE = re.compile(r"^session id:\s*([0-9a-fA-F-]+)\s*$", re.MULTILINE)
+
+# How long codex gets to shut down cleanly after SIGTERM before we SIGKILL it.
+# The point of the grace period is auth.json: if the run happens to be killed
+# while codex is mid token-rotation (OpenAI已換發新的 refresh token、codex 還
+# 沒寫回本地), a hard SIGKILL leaves the home holding a token the server已經
+# 作廢,下次使用就是 reuse,而 reuse 會讓 OpenAI 撤銷該 *使用者* 名下所有
+# session（2026-08-01 事故:同一個 user 的兩個 home 同時陣亡）。
+_TERM_GRACE_SECONDS = 10.0
 
 # Filename of the per-CODEX_HOME advisory lock. Lives *inside* the home dir so
 # the same inode is visible to every process that touches that home — the
@@ -34,14 +45,43 @@ def _flock_acquire(path: Path) -> int | None:
     still in force, so degrading here only loosens *cross-process* safety)."""
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
+    except OSError as exc:
+        # Silent degradation was the old behaviour and it hid the exact moment
+        # cross-process serialization stopped being in force. Say it loudly.
+        logger.warning("codex home lock unavailable (open failed) path=%s err=%s", path, exc)
         return None
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-    except OSError:
+    except OSError as exc:
         os.close(fd)
+        logger.warning("codex home lock unavailable (flock failed) path=%s err=%s", path, exc)
         return None
     return fd
+
+
+def _auth_snapshot(codex_home: str | None) -> dict[str, object] | None:
+    """Fingerprint a home's auth.json so token rotation is observable.
+
+    Returns the refresh token's sha256 prefix (never the token itself), the
+    file mtime and codex 自己記的 `last_refresh`. None when the home has no
+    readable/parsable auth.json.
+    """
+    if not codex_home:
+        return None
+    path = Path(codex_home) / "auth.json"
+    try:
+        raw = path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        mtime = path.stat().st_mtime
+    except (OSError, ValueError):
+        return None
+    tokens = payload.get("tokens") or {}
+    refresh = tokens.get("refresh_token") or ""
+    return {
+        "rt": hashlib.sha256(refresh.encode("utf-8")).hexdigest()[:12],
+        "last_refresh": payload.get("last_refresh"),
+        "mtime": round(mtime, 3),
+    }
 
 
 def _flock_release(fd: int | None) -> None:
@@ -240,6 +280,74 @@ class CodexImageGenerator:
         # `codex exec` per home so only one process touches a given auth.json
         # at a time.
         self._exec_locks: dict[str, asyncio.Lock] = {}
+
+    @property
+    def _audit_path(self) -> Path:
+        """Append-only token audit trail, next to the run dirs so it survives
+        container recreation via the same bind mount."""
+        return Path(self.settings.codex_workdir).parent / "token-audit.log"
+
+    def _audit_token_state(
+        self,
+        *,
+        event: str,
+        codex_home: str | None,
+        before: dict[str, object] | None,
+        after: dict[str, object] | None,
+    ) -> None:
+        """Record what a codex run did to this home's auth.json.
+
+        事故當下最缺的就是這條線索:token 是哪一次 run 之後變的、那次 run 是
+        正常結束還是被殺掉的。`rotated` 為真且 event 是 timeout_kill 時,就是
+        「輪替可能沒寫回本地」的高風險現場,要能事後一眼撈出來。
+        """
+        rotated = bool(before and after and before.get("rt") != after.get("rt"))
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "event": event,
+            "codex_home": codex_home,
+            "rotated": rotated,
+            "before": before,
+            "after": after,
+        }
+        if rotated and event == "timeout_kill":
+            logger.warning(
+                "codex run was killed across a token rotation home=%s before=%s after=%s",
+                codex_home,
+                (before or {}).get("rt"),
+                (after or {}).get("rt"),
+            )
+        try:
+            self._audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._audit_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:  # 審計失敗絕不能拖垮生圖
+            logger.warning("token audit write failed: %s", exc)
+
+    async def _terminate_process_group(self, process, grace_seconds: float = _TERM_GRACE_SECONDS):
+        """SIGTERM → 寬限 → SIGKILL,回傳 (stdout, stderr)。
+
+        直接 SIGKILL 會在 codex 剛跟 OpenAI 換完 refresh token、還沒寫回
+        auth.json 的瞬間把它砍掉,那個 home 之後就帶著一個伺服器端已作廢的
+        token,下次使用即 reuse。先給 SIGTERM 讓它有機會收尾。
+        """
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(process.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+            timeout = grace_seconds if sig == signal.SIGTERM else 5
+            try:
+                return await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                if sig == signal.SIGTERM:
+                    logger.warning(
+                        "codex ignored SIGTERM after %.1fs, escalating to SIGKILL pid=%s",
+                        grace_seconds,
+                        process.pid,
+                    )
+                continue
+        return b"", b""
 
     def _exec_lock_for(self, codex_home: str | None) -> asyncio.Lock:
         key = codex_home or "__container_default__"
@@ -567,6 +675,7 @@ class CodexImageGenerator:
         # refresh that must not race with another process happens *during*
         # the run, not just at launch.
         async with self._home_exec_guard(codex_home):
+            auth_before = _auth_snapshot(codex_home)
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
@@ -581,16 +690,13 @@ class CodexImageGenerator:
                     timeout=self.settings.codex_timeout_seconds,
                 )
             except asyncio.TimeoutError as exc:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                try:
-                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                        process.communicate(), timeout=5
-                    )
-                except asyncio.TimeoutError:
-                    stdout_bytes, stderr_bytes = b"", b""
+                stdout_bytes, stderr_bytes = await self._terminate_process_group(process)
+                self._audit_token_state(
+                    event="timeout_kill",
+                    codex_home=codex_home,
+                    before=auth_before,
+                    after=_auth_snapshot(codex_home),
+                )
                 raise CodexGenerationError(
                     f"Codex timed out after {self.settings.codex_timeout_seconds} seconds",
                     stdout=stdout_bytes.decode("utf-8", errors="replace"),
@@ -598,6 +704,17 @@ class CodexImageGenerator:
                     command=command_display,
                     workdir=run_dir,
                 ) from exc
+
+            # Normal completion: only worth a line when the token actually
+            # rotated (幾百次 run 才會輪替一次), so the audit stays greppable.
+            auth_after = _auth_snapshot(codex_home)
+            if auth_before and auth_after and auth_before["rt"] != auth_after["rt"]:
+                self._audit_token_state(
+                    event="rotated",
+                    codex_home=codex_home,
+                    before=auth_before,
+                    after=auth_after,
+                )
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
