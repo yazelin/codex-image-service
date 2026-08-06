@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app import db
-from app.services import codex_image
+from app.services import chatgpt_usage, codex_image
 from app.models import ImageGenerateRequest
 from app.security import constant_equals, create_admin_session, verify_admin_session
 from app.services.job_queue import GenerationQueueUnavailable
@@ -127,7 +127,13 @@ async def logout(request: Request) -> RedirectResponse:
 async def overview(request: Request):
     if not _admin_user(request):
         return _redirect_login(request)
-    return HTMLResponse(_overview_page(request.app.state.settings, _prefix(request)))
+    settings = request.app.state.settings
+    # 外部呼叫,所以在 route 這層 await 完再交給同步的 renderer;卡住也只卡
+    # 這個請求(client timeout 6s),不會擋到出圖 worker。
+    usage = await chatgpt_usage.fetch_many(
+        _effective_homes(getattr(settings, "codex_homes", ()) or ())
+    )
+    return HTMLResponse(_overview_page(settings, _prefix(request), usage))
 
 
 @router.get("/admin/keys", response_class=HTMLResponse, include_in_schema=False)
@@ -308,7 +314,9 @@ def _format_uptime(seconds: float) -> str:
     return f"{s}s"
 
 
-def _overview_page(settings: Any, prefix: str) -> str:
+def _overview_page(
+    settings: Any, prefix: str, usage_by_home: dict[str, dict[str, Any]] | None = None
+) -> str:
     from app.main import _START_TIME  # deferred: app.main imports this module
 
     stats = db.dashboard_stats(settings)
@@ -330,7 +338,7 @@ def _overview_page(settings: Any, prefix: str) -> str:
         <div><strong>{stats['queued_count']}</strong><span>Queued / running</span></div>
         <div><strong>{_format_uptime(time.time() - _START_TIME)}</strong><span>Uptime</span></div>
       </section>
-      {_codex_accounts_section(homes_configured, per_account, per_account_24h, prefix, current_mode)}
+      {_codex_accounts_section(homes_configured, per_account, per_account_24h, prefix, current_mode, usage_by_home)}
       <section>
         <div class="section-title">
           <h2>Recent activity</h2>
@@ -360,12 +368,26 @@ def _dispatch_mode_form(prefix: str, current: str) -> str:
     )
 
 
+def _effective_homes(homes_configured: tuple[str, ...]) -> list[str]:
+    """實際在用的 CODEX_HOME 清單。
+
+    CODEX_HOMES 有設就用它;沒設則退回容器自己的 $HOME/.codex,但只在那裡
+    真的有 auth.json 時才算數。
+    """
+    homes = list(homes_configured)
+    if homes:
+        return homes
+    default = str(Path.home() / ".codex")
+    return [default] if Path(default, "auth.json").is_file() else []
+
+
 def _codex_accounts_section(
     homes_configured: tuple[str, ...],
     per_account: list[dict[str, Any]],
     per_account_24h: list[dict[str, Any]] | None = None,
     prefix: str = "",
     current_mode: str = "round-robin",
+    usage_by_home: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Render a card per Codex account in use, with usage stats + auth health.
 
@@ -375,11 +397,7 @@ def _codex_accounts_section(
     """
     # Effective homes: CODEX_HOMES list when set; otherwise the container
     # default $HOME/.codex (which our docker-compose mounts from the host).
-    effective_homes: list[str] = list(homes_configured)
-    if not effective_homes:
-        default = str(Path.home() / ".codex")
-        if Path(default, "auth.json").is_file():
-            effective_homes.append(default)
+    effective_homes = _effective_homes(homes_configured)
 
     has_data = any(row.get("codex_home") for row in per_account)
     if not effective_homes and not has_data:
@@ -394,14 +412,16 @@ def _codex_accounts_section(
         seen.add(home)
         stats = by_path.get(home, {"total": 0, "succeeded": 0, "failed": 0, "last_seen": None})
         cards.append(_codex_account_card(home, stats, configured=True,
-                                         stats_24h=by_path_24h.get(home)))
+                                         stats_24h=by_path_24h.get(home),
+                                         usage=(usage_by_home or {}).get(home)))
 
     # also show any historical homes that appeared in DB but aren't currently configured
     for row in per_account:
         h = row.get("codex_home") or ""
         if h and h not in seen:
             cards.append(_codex_account_card(h, row, configured=False,
-                                             stats_24h=by_path_24h.get(h)))
+                                             stats_24h=by_path_24h.get(h),
+                                             usage=(usage_by_home or {}).get(h)))
 
     multi = len(effective_homes) > 1
     subtitle = (
@@ -460,12 +480,44 @@ def _success_rate_24h(stats: dict[str, Any] | None) -> str:
     return f"{round(100 * ok / total)}%"
 
 
+def _quota_cells(usage: dict[str, Any] | None) -> str:
+    """訂閱額度剩餘 % 的格子,一個 rate-limit window 一格。
+
+    窗的名稱來自 API 的 limit_window_seconds,不是寫死的「5h / 週」——team
+    方案只有一個七天窗,寫死會標成 5 小時(見 chatgpt_usage.window_label)。
+    查不到顯示 —,不是 0%:把「不知道」畫成「用光了」會害人白跑一趟去換帳號。
+    """
+    windows = (usage or {}).get("windows") or []
+    if not windows:
+        return "<div><strong>—</strong><span>Quota left</span></div>"
+    return "".join(
+        f"<div><strong>{w['remaining_percent']}%</strong>"
+        f"<span>{html.escape(w['label'])} left</span></div>"
+        for w in windows
+    )
+
+
+def _quota_reset_text(usage: dict[str, Any] | None) -> str:
+    """額度重置倒數。reset_at 是 epoch 秒(跟 cx usage 同一個欄位)。"""
+    windows = (usage or {}).get("windows") or []
+    parts = []
+    for w in windows:
+        reset_at = w.get("reset_at")
+        if not reset_at:
+            continue
+        seconds = reset_at - datetime.now(timezone.utc).timestamp()
+        when = "due" if seconds <= 0 else f"in {_format_uptime(seconds)}"
+        parts.append(f"{w['label']} resets {when}")
+    return " · ".join(parts) if parts else "quota resets —"
+
+
 def _codex_account_card(
     home_path: str,
     stats: dict[str, Any],
     *,
     configured: bool,
     stats_24h: dict[str, Any] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """One CODEX_HOME → one card. Reads auth.json for last_refresh, account_id,
     and the access_token's actual JWT `exp`. Health chip + expiry text are
@@ -552,8 +604,10 @@ def _codex_account_card(
           <div><strong>{succeeded}</strong><span>Succeeded</span></div>
           <div><strong>{failed}</strong><span>Failed</span></div>
           <div><strong>{_success_rate_24h(stats_24h)}</strong><span>24h success</span></div>
+          {_quota_cells(usage)}
         </div>
         <div class="account-footer">
+          <span>{html.escape(_quota_reset_text(usage))}</span>
           <span>Auth: {auth_status}</span>
           <span>{html.escape(expires_str)}</span>
           <span>{'last_refresh ' + last_refresh_str if last_refresh_str else 'last_refresh —'}</span>

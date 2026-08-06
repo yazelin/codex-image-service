@@ -55,6 +55,13 @@ don't), the raw MP4 lives at
 - `GET /health` — `{"status":"ok"}`.
 - Admin UI under `/admin` for issuing / disabling / deleting API keys,
   running test generations, and manual cleanup.
+- Per-account ChatGPT quota on the overview page: each `CODEX_HOME` card shows
+  the remaining percentage and reset countdown for every rate-limit window the
+  ChatGPT backend reports, so a pool account running dry is visible before it
+  starts failing jobs. Window names come from `limit_window_seconds` rather
+  than the primary/secondary position — team plans expose a single 7-day
+  window in `primary_window`, so labelling by position reads a weekly limit as
+  a 5-hour one.
 - SQLite-backed history of every request with prompt, stdout, stderr,
   status, and auto-expiry by `IMAGE_RETENTION_DAYS` (default 7).
 
