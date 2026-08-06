@@ -17,7 +17,7 @@ from pathlib import Path
 
 from app import db
 from app.config import Settings
-from app.services import storage
+from app.services import chatgpt_usage, storage
 
 
 logger = logging.getLogger(__name__)
@@ -403,6 +403,46 @@ class CodexImageGenerator:
             self._home_cursor = (self._home_cursor + 1) % len(homes)
         return base
 
+    async def _rotation(self) -> list[str | None]:
+        """這次請求可用的 CODEX_HOME,照輪替順序排,額度見底的排除掉。
+
+        沒有這道過濾時,輪到剩 0% 的帳號整筆就失敗,retry 只是換一個再燒一次。
+        用量從 chatgpt_usage 拿(120 秒快取,不是每次都打外部 API)。
+
+        兩條刻意的保守規則:
+        - **查不到用量的帳號視為可用。** 拿不到數字就跳過它,等於一次網路問題
+          就讓整池縮水,那比偶爾撞一次牆糟。
+        - **全部都低於門檻時不跳過任何一個。** 寧可去撞牆讓既有的 retry 處理,
+          也不要整條線因為「都沒額度了」而直接罷工——判斷可能是錯的,而且
+          撞牆的錯誤訊息比「服務自己拒絕」更容易查。
+        """
+        homes = list(self.settings.codex_homes)
+        if not homes:
+            return [None]
+        base = await self._claim_primary_base()
+        ordered = [homes[(base + i) % len(homes)] for i in range(len(homes))]
+
+        threshold = self.settings.codex_min_quota_percent
+        if threshold <= 0:
+            return ordered
+        try:
+            usage = await chatgpt_usage.fetch_many(ordered)
+        except Exception as exc:  # 查用量壞掉不該影響出圖
+            logger.warning("quota lookup failed, rotating over all homes: %s", exc)
+            return ordered
+
+        healthy, drained = [], []
+        for home in ordered:
+            windows = (usage.get(home) or {}).get("windows") or []
+            worst = min((w["remaining_percent"] for w in windows), default=None)
+            (drained if worst is not None and worst < threshold else healthy).append(home)
+        if drained:
+            logger.info(
+                "skipping drained homes (<%d%% left): %s",
+                threshold, ", ".join(Path(h).name for h in drained),
+            )
+        return healthy or ordered
+
     def _home_for_attempt(self, base: int, attempt_index: int) -> str | None:
         """Look up the CODEX_HOME path for attempt N of a request whose
         primary slot was `base`. attempt_index=0 = primary; 1+ = retry
@@ -411,6 +451,20 @@ class CodexImageGenerator:
         if not homes:
             return None
         return homes[(base + attempt_index) % len(homes)]
+
+    @staticmethod
+    def _log_vision_failure(request_id, codex_home, why, stdout, stderr):
+        """判讀失敗留一行 WARNING,帶 stdout/stderr 尾段。
+
+        尾段而不是開頭:codex 的 stdout 前面是固定的 header(版號、模型、
+        sandbox 設定),真正的錯誤在最後面。各截 400 字,夠看出是額度用完、
+        被安全機制擋掉,還是別的。
+        """
+        logger.warning(
+            "vision %s FAILED home=%s why=%s stdout_tail=%r stderr_tail=%r",
+            request_id, Path(codex_home).name if codex_home else "default", why,
+            (stdout or "").strip()[-400:], (stderr or "").strip()[-400:],
+        )
 
     async def inspect(
         self,
@@ -473,7 +527,7 @@ class CodexImageGenerator:
 
         # 跟出圖共用同一組帳號與同一把 per-home exec lock。判讀很短(實測十幾
         # 秒),但 token refresh 一樣可能發生在執行中,鎖不能省。
-        codex_home = self._home_for_attempt(await self._claim_primary_base(), 0)
+        codex_home = (await self._rotation())[0]
         env = os.environ.copy()
         if codex_home:
             env["CODEX_HOME"] = codex_home
@@ -493,6 +547,12 @@ class CodexImageGenerator:
                 )
             except asyncio.TimeoutError as exc:
                 stdout_bytes, stderr_bytes = await self._terminate_process_group(process)
+                self._log_vision_failure(
+                    request_id, codex_home,
+                    f"timeout after {self.settings.codex_timeout_seconds}s",
+                    stdout_bytes.decode("utf-8", errors="replace"),
+                    stderr_bytes.decode("utf-8", errors="replace"),
+                )
                 raise CodexGenerationError(
                     f"Codex timed out after {self.settings.codex_timeout_seconds} seconds",
                     stdout=stdout_bytes.decode("utf-8", errors="replace"),
@@ -503,6 +563,11 @@ class CodexImageGenerator:
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
         if process.returncode != 0:
+            # 失敗一定要留在伺服器端的 log。第一次上線那天就踩到:一筆判讀回
+            # 502,而服務這邊只有 access log 那行「502 Bad Gateway」,錯誤內容
+            # 全在 HTTP response 裡回給呼叫端了,事後完全查不出為什麼。
+            self._log_vision_failure(request_id, codex_home,
+                                     f"exit code {process.returncode}", stdout, stderr)
             raise CodexGenerationError(
                 f"Codex exited with code {process.returncode}",
                 stdout=stdout, stderr=stderr, workdir=run_dir,
@@ -512,6 +577,8 @@ class CodexImageGenerator:
         if not text:
             # 空的最後訊息 = 模型被安全機制擋掉、或 codex 自己出錯而 returncode
             # 仍是 0。這種要當失敗上拋,不能回一個空字串讓呼叫端當成「沒問題」。
+            self._log_vision_failure(request_id, codex_home, "empty final message",
+                                     stdout, stderr)
             raise CodexGenerationError(
                 "Codex returned no final message", stdout=stdout, stderr=stderr,
                 workdir=run_dir,
@@ -684,14 +751,13 @@ class CodexImageGenerator:
         configured home, retry once on the next account. Returns the
         final (command_display, stdout, stderr, codex_home_used) tuple.
         """
-        homes = self.settings.codex_homes
-        max_attempts = 1 if len(homes) <= 1 else 2
-        # Reserve a primary slot once; retries step from there without
-        # double-advancing the global cursor.
-        primary_base = await self._claim_primary_base()
+        # 額度見底的帳號不再排進來(見 _rotation)。輪替順序也由它決定,所以
+        # 這裡不再自己算 primary_base。
+        rotation = await self._rotation()
+        max_attempts = 1 if len(rotation) <= 1 else 2
         last_error: CodexGenerationError | None = None
         for attempt in range(max_attempts):
-            picked_home = self._home_for_attempt(primary_base, attempt)
+            picked_home = rotation[attempt % len(rotation)]
             try:
                 command, stdout, stderr = await self._run_codex_once(
                     run_dir=run_dir,

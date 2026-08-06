@@ -295,6 +295,13 @@ Then add to `.env` (paths as visible inside the container):
 
 ```dotenv
 CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
+
+# Skip accounts whose weekly ChatGPT quota is nearly gone. Default 5 (%);
+# set 0 to disable. Accounts whose usage cannot be read are treated as
+# usable, and if *every* account is below the threshold none are skipped —
+# hitting the wall and letting the existing retry handle it beats the
+# service refusing to work.
+CODEX_MIN_QUOTA_PERCENT=5
 ```
 
 `docker-compose.yml` already mounts `~/codex-homes:/host_codex_homes`

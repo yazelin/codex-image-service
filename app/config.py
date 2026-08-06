@@ -44,6 +44,9 @@ class Settings:
     image_retention_days: int
     cleanup_interval_hours: int
     cors_allow_origins: tuple[str, ...] = ()  # () = 不掛 CORS middleware,維持既有行為
+    # 週配額剩餘低於這個百分比的 CODEX_HOME 不再被輪到。0 = 關掉這個機制。
+    # 預設 5:實測輪到剩 0% 的帳號時整筆請求會失敗,而 retry 只會多燒一次。
+    codex_min_quota_percent: int = 5
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -57,6 +60,7 @@ class Settings:
             generated_dir=Path(os.getenv("GENERATED_DIR", "static/generated")),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/"),
             codex_timeout_seconds=_int_env("CODEX_TIMEOUT_SECONDS", 360),
+            codex_min_quota_percent=_int_env("CODEX_MIN_QUOTA_PERCENT", 5),
             codex_workdir=Path(os.getenv("CODEX_WORKDIR", "./data/codex-runs")),
             codex_worker_concurrency=_int_env("CODEX_WORKER_CONCURRENCY", 2),
             codex_homes=tuple(
