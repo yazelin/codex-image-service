@@ -31,6 +31,24 @@ class ImageGenerateRequest(BaseModel):
         return []
 
 
+class VisionRequest(BaseModel):
+    """看圖回文字。跟產圖是兩件事,所以不共用 ImageGenerateRequest——
+
+    那邊的 size / quality / count 對判讀沒有意義,reference_images 的語意也
+    相反(那是「照著這些畫」,這是「看著這些回答」)。硬共用會讓兩邊的欄位
+    互相汙染。
+    """
+
+    prompt: str = Field(min_length=1, max_length=32000)
+    images_base64: list[str] = Field(min_length=1, max_length=16)
+
+
+class VisionResponse(BaseModel):
+    id: str
+    text: str
+    created_at: str
+
+
 class GeneratedImage(BaseModel):
     url: str
     expires_at: str
