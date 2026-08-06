@@ -51,6 +51,12 @@ don't), the raw MP4 lives at
 - `POST /v1/images/jobs` — bearer-auth, async: returns `202` with a job id
   immediately, no long-lived connection needed.
 - `GET /v1/images/jobs/<id>` — poll job status until `succeeded` / `failed`.
+- `POST /v1/vision` — bearer-auth, sync: send `{prompt, images_base64}` and get the
+  model's final text back. The Codex CLI underneath can read images as well as make
+  them; this endpoint is the read side. Useful for checking a generated image against
+  a spec from CI, where no logged-in Codex CLI exists. Skips the generation queue
+  (a ~20 s read should not wait behind a multi-minute render) but shares the same
+  accounts and the same per-`CODEX_HOME` exec lock.
 - `GET /generated/<id>.png` — public download for the generated PNGs.
 - `GET /health` — `{"status":"ok"}`.
 - Admin UI under `/admin` for issuing / disabling / deleting API keys,

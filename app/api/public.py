@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -11,8 +13,11 @@ from app.models import (
     ImageGenerateResponse,
     ImageJobStatusResponse,
     ImageJobSubmitResponse,
+    VisionRequest,
+    VisionResponse,
 )
 from app.services import storage
+from app.services.codex_image import CodexGenerationError
 from app.services.job_queue import GenerationJobFailed, GenerationQueueUnavailable
 
 
@@ -129,3 +134,41 @@ async def get_image_job(
         "expires_at": row.get("expires_at"),
     }
 
+
+
+@router.post("/v1/vision", response_model=VisionResponse)
+async def inspect_images(
+    payload: VisionRequest,
+    request: Request,
+    api_key: dict = Depends(require_api_key),
+) -> dict:
+    """看圖回文字。收圖與提示詞,回模型的最後一則訊息。
+
+    底層是同一個 Codex CLI,它本來就會視覺判讀;這個服務原本只是把出口寫死
+    成圖。用途例:出圖之後拿設定表回頭驗這張圖有沒有畫錯,而 CI 上沒有登入態
+    的 Codex CLI,只有這個服務有。
+
+    **刻意不進 job queue。** 那個佇列是為「一次一張、幾分鐘起跳」的產圖排的;
+    判讀十幾秒就回來,排進去只會被前面的產圖卡住。並行度由每個 CODEX_HOME 的
+    exec lock 管,跟產圖共用同一組帳號與同一把鎖。
+    """
+    # 用佇列持有的那個實例,不是新建一個:per-CODEX_HOME 的 exec lock 與帳號
+    # 輪替游標都在實例上,各建各的等於沒鎖,兩條路會同時動同一個 auth.json。
+    service = request.app.state.job_queue.generator
+    request_id = f"vis_{secrets.token_hex(12)}"
+    try:
+        text = await service.inspect(
+            request_id=request_id,
+            prompt=payload.prompt,
+            images_base64=payload.images_base64,
+        )
+    except CodexGenerationError as exc:
+        # 判讀失敗要讓呼叫端看得出是「上游沒回東西」而不是「這張圖沒問題」。
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+        ) from exc
+    return {
+        "id": request_id,
+        "text": text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }

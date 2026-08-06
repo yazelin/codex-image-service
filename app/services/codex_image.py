@@ -412,6 +412,111 @@ class CodexImageGenerator:
             return None
         return homes[(base + attempt_index) % len(homes)]
 
+    async def inspect(
+        self,
+        *,
+        request_id: str,
+        prompt: str,
+        images_base64: list[str],
+    ) -> str:
+        """看圖回文字。收圖與提示詞,回模型的最後一則訊息。
+
+        底層是同一個 Codex CLI,它本來就會視覺判讀——這個服務只是一直把出口
+        寫死成圖(找 rollout 裡的 image、找不到就算失敗)。這條路刻意不碰那一
+        整套:不進 job queue、不落檔到 generated/、不做輸出雜湊去重,因為那些
+        都是為「產出一張新圖」設計的,對「讀一張既有的圖」沒有意義。
+
+        最後一則訊息用 `--output-last-message` 寫進檔案再讀,不解析 stdout。
+        stdout 的版面(header、user 段、codex 段、tokens used、結尾重印一次)
+        是給人看的,codex 一改版就會壞。
+
+        沙盒用 read-only:這條只需要讀圖,不需要寫任何東西。出圖那條之所以用
+        `--dangerously-bypass-approvals-and-sandbox`,是因為 image_gen 工具要
+        落檔;判讀不用,權限就該收到最小。
+        """
+        storage.ensure_storage(self.settings)
+        run_dir = self.settings.codex_workdir / request_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        image_paths: list[Path] = []
+        for idx, b64 in enumerate(images_base64, start=1):
+            try:
+                raw = base64.b64decode(b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise CodexGenerationError(
+                    f"images_base64[{idx - 1}] is not valid base64: {exc}",
+                    workdir=run_dir,
+                ) from exc
+            if not raw:
+                raise CodexGenerationError(
+                    f"images_base64[{idx - 1}] decoded to zero bytes", workdir=run_dir
+                )
+            path = run_dir / f"inspect_{idx}{_detect_image_ext(raw)}"
+            path.write_bytes(raw)
+            image_paths.append(path)
+
+        last_message = run_dir / "last_message.txt"
+        last_message.unlink(missing_ok=True)
+        command = [
+            "codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only",
+            "-C", str(run_dir),
+            "--output-last-message", str(last_message),
+        ]
+        for path in image_paths:
+            command.extend(["--image", str(path.resolve())])
+        command.extend(["--", prompt])
+
+        # 跟出圖共用同一組帳號與同一把 per-home exec lock。判讀很短(實測十幾
+        # 秒),但 token refresh 一樣可能發生在執行中,鎖不能省。
+        codex_home = self._home_for_attempt(await self._claim_primary_base(), 0)
+        env = os.environ.copy()
+        if codex_home:
+            env["CODEX_HOME"] = codex_home
+
+        started = time.monotonic()
+        async with self._home_exec_guard(codex_home):
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+                env=env,
+            )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    process.communicate(), timeout=self.settings.codex_timeout_seconds
+                )
+            except asyncio.TimeoutError as exc:
+                stdout_bytes, stderr_bytes = await self._terminate_process_group(process)
+                raise CodexGenerationError(
+                    f"Codex timed out after {self.settings.codex_timeout_seconds} seconds",
+                    stdout=stdout_bytes.decode("utf-8", errors="replace"),
+                    stderr=stderr_bytes.decode("utf-8", errors="replace"),
+                    workdir=run_dir,
+                ) from exc
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        if process.returncode != 0:
+            raise CodexGenerationError(
+                f"Codex exited with code {process.returncode}",
+                stdout=stdout, stderr=stderr, workdir=run_dir,
+            )
+
+        text = last_message.read_text(encoding="utf-8").strip() if last_message.is_file() else ""
+        if not text:
+            # 空的最後訊息 = 模型被安全機制擋掉、或 codex 自己出錯而 returncode
+            # 仍是 0。這種要當失敗上拋,不能回一個空字串讓呼叫端當成「沒問題」。
+            raise CodexGenerationError(
+                "Codex returned no final message", stdout=stdout, stderr=stderr,
+                workdir=run_dir,
+            )
+        logger.info(
+            "vision %s ok %.0fs home=%s",
+            request_id, time.monotonic() - started, codex_home or "default",
+        )
+        return text
+
     async def generate(
         self,
         *,
