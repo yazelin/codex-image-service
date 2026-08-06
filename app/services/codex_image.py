@@ -461,6 +461,11 @@ class CodexImageGenerator:
             "codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only",
             "-C", str(run_dir),
             "--output-last-message", str(last_message),
+            # 推理強度要釘住,不能吃 CODEX_HOME 裡那份 config 的預設(實測是
+            # none)。判讀在 none 之下會飄:同一張圖同一份規則,連跑兩輪判定
+            # 不一樣,而消費端會拿它當閘門。medium 之後兩輪一致,代價是每張
+            # 多幾秒。
+            "-c", 'model_reasoning_effort="medium"',
         ]
         for path in image_paths:
             command.extend(["--image", str(path.resolve())])
