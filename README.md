@@ -341,7 +341,24 @@ new writes preserve ownership automatically.
 Each `image_requests` row expires at `created_at + IMAGE_RETENTION_DAYS`.
 A background sweep runs on startup and every `CLEANUP_INTERVAL_HOURS`,
 deleting the PNG under `static/generated/`, the workdir under
-`data/codex-runs/<id>/`, and marking the row `expired`. The admin can also
+`data/codex-runs/<id>/`, and marking the row `expired`.
+
+The same sweep also deletes **Codex session rollouts** older than
+`SESSION_RETENTION_DAYS` (default 3) from every `CODEX_HOMES` entry, and from
+the container's own `~/.codex` when `CODEX_HOMES` is empty. This matters more
+than it sounds: newer Codex embeds each generated image as base64 inside the
+session rollout `.jsonl` rather than writing a PNG, and this service reads the
+image back out of it — so every generation *necessarily* leaves behind a
+rollout carrying a full copy of the image. Once extracted, that file is dead
+weight, and nothing else removes it.
+
+Left unmanaged it grows without bound. On one deployment `~/codex-homes`
+reached 23 GB across three rotating accounts — 5.7 GB from a single month of
+heavy generation — and was still growing by roughly 1.3 GB every three days.
+Retention is short because these files are only useful for `codex resume`,
+which this service never does (it runs one-shot subprocesses); the window
+exists so a human can still inspect a recent failure. Set it to `0` to
+disable the sweep. The admin can also
 trigger immediate cleanup or per-row Delete from the dashboard.
 
 ## Version control

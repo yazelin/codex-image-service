@@ -14,6 +14,8 @@ class CleanupResult:
     expired_requests: int = 0
     deleted_files: int = 0
     deleted_workdirs: int = 0
+    deleted_sessions: int = 0
+    freed_session_bytes: int = 0
     errors: list[str] | None = None
 
     def add_error(self, message: str) -> None:
@@ -74,6 +76,7 @@ def cleanup_expired_storage(settings: Settings) -> CleanupResult:
 
     result.deleted_files += _cleanup_orphan_images(settings, result)
     result.deleted_workdirs += _cleanup_old_workdirs(settings, result)
+    _cleanup_old_codex_sessions(settings, result)
     return result
 
 
@@ -127,3 +130,64 @@ def _cleanup_old_workdirs(settings: Settings, result: CleanupResult) -> int:
         except OSError as exc:
             result.add_error(f"Could not delete orphan workdir {workdir}: {exc}")
     return deleted
+
+
+def _codex_session_dirs(settings: Settings) -> list[Path]:
+    """Every CODEX_HOME the service rotates through, plus the container default.
+
+    CODEX_HOMES is a colon-separated list of home directories (one per account).
+    When it is empty the service falls back to the container's own ~/.codex.
+    """
+    from app.services.codex_image import _codex_home
+
+    # 沒設 CODEX_HOMES 時，用跟 codex_image.py 完全同一套 fallback（$CODEX_HOME → ~/.codex）。
+    # 兩處對「home 在哪」如果各判各的，就會清錯目錄或整個漏掉。
+    homes = [Path(h) for h in settings.codex_homes] or [_codex_home(None)]
+    return [h / "sessions" for h in homes]
+
+
+def _cleanup_old_codex_sessions(settings: Settings, result: CleanupResult) -> None:
+    """Delete rollout .jsonl files older than SESSION_RETENTION_DAYS.
+
+    Why this exists: newer Codex embeds the generated image as base64 inside the
+    session rollout jsonl instead of writing a png (see codex_image.py), and this
+    service reads the image back out of it. That makes the rollout a *required*
+    intermediate — and a large one, since every image is carried in full as
+    base64. Once the image has been extracted and saved to generated/, the
+    rollout is dead weight.
+
+    Left alone it grows without bound: on one deployment ~/codex-homes reached
+    23 GB across three accounts, 5.7 GB of it from a single month of heavy
+    generation, and it was still growing by ~1.3 GB every three days.
+
+    Retention is deliberately short (3 days). These files are only useful for
+    `codex resume`, which this service never does — it runs one-shot
+    subprocesses. The window exists purely so a human can inspect a recent
+    failure.
+    """
+    if settings.session_retention_days <= 0:
+        return  # 0 或負數 = 停用，留給想自己管的部署
+
+    cutoff = (db.utc_now() - timedelta(days=settings.session_retention_days)).timestamp()
+    for sessions_dir in _codex_session_dirs(settings):
+        if not sessions_dir.is_dir():
+            continue
+        for rollout in sessions_dir.rglob("*.jsonl"):
+            try:
+                stat = rollout.stat()
+                if stat.st_mtime >= cutoff:
+                    continue
+                size = stat.st_size
+                rollout.unlink()
+                result.deleted_sessions += 1
+                result.freed_session_bytes += size
+            except OSError as exc:
+                result.add_error(f"Could not delete session rollout {rollout}: {exc}")
+
+        # 清掉因此變空的日期目錄（sessions/YYYY/MM/DD），別動 sessions/ 本身
+        for path in sorted(sessions_dir.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if path.is_dir() and not any(path.iterdir()):
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
