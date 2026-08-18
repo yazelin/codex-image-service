@@ -695,7 +695,9 @@ def _requests_page(
         message = (
             f"Cleanup complete — expired requests: {cleanup_result.expired_requests}, "
             f"deleted files: {cleanup_result.deleted_files}, "
-            f"deleted workdirs: {cleanup_result.deleted_workdirs}."
+            f"deleted workdirs: {cleanup_result.deleted_workdirs}, "
+            f"deleted session rollouts: {cleanup_result.deleted_sessions} "
+            f"({cleanup_result.freed_session_bytes / 1_048_576:.0f} MB freed)."
         )
         if errors:
             message += " Errors: " + html.escape("; ".join(errors))
