@@ -51,10 +51,23 @@ don't), the raw MP4 lives at
 - `POST /v1/images/jobs` — bearer-auth, async: returns `202` with a job id
   immediately, no long-lived connection needed.
 - `GET /v1/images/jobs/<id>` — poll job status until `succeeded` / `failed`.
+- `POST /v1/vision` — bearer-auth, sync: send `{prompt, images_base64}` and get the
+  model's final text back. The Codex CLI underneath can read images as well as make
+  them; this endpoint is the read side. Useful for checking a generated image against
+  a spec from CI, where no logged-in Codex CLI exists. Skips the generation queue
+  (a ~20 s read should not wait behind a multi-minute render) but shares the same
+  accounts and the same per-`CODEX_HOME` exec lock.
 - `GET /generated/<id>.png` — public download for the generated PNGs.
 - `GET /health` — `{"status":"ok"}`.
 - Admin UI under `/admin` for issuing / disabling / deleting API keys,
   running test generations, and manual cleanup.
+- Per-account ChatGPT quota on the overview page: each `CODEX_HOME` card shows
+  the remaining percentage and reset countdown for every rate-limit window the
+  ChatGPT backend reports, so a pool account running dry is visible before it
+  starts failing jobs. Window names come from `limit_window_seconds` rather
+  than the primary/secondary position — team plans expose a single 7-day
+  window in `primary_window`, so labelling by position reads a weekly limit as
+  a 5-hour one.
 - SQLite-backed history of every request with prompt, stdout, stderr,
   status, and auto-expiry by `IMAGE_RETENTION_DAYS` (default 7).
 
@@ -284,10 +297,12 @@ Then add to `.env` (paths as visible inside the container):
 CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
 ```
 
-`docker-compose.yml` already mounts `~/codex-homes:/host_codex_homes:ro`,
+`docker-compose.yml` already mounts `~/codex-homes:/host_codex_homes`
+read-write (codex writes sessions and rotates tokens inside `CODEX_HOME`),
 so any subdirectory you create under `~/codex-homes/` becomes available
-at `/host_codex_homes/<name>` inside the container. Restart with
-`docker compose up -d --build` and the rotation kicks in.
+at `/host_codex_homes/<name>` inside the container. An `.env`-only change
+needs just `docker compose up -d` to take effect; the rotation kicks in
+once the container is recreated.
 
 When more than one account is configured, the Overview also carries a
 **Dispatch mode** switch (stored in the DB, survives restarts):
@@ -309,15 +324,38 @@ ChatGPT `account_id` so you can tell which is which. The History page
 gains an Account column with the chosen home (tooltip shows the full
 path).
 
-**Token refresh maintenance:** access tokens expire after ~10 days; the
-auth.json files are mounted read-only, so the container can't refresh
-them. Use codex periodically from the host with each home (or set up
-a small cron) to keep them fresh:
+**Token refresh maintenance:** access tokens live ~10 days (240h) and the
+pool homes are mounted read-write, so codex refreshes them in place —
+whichever process (a generation or the keepalive) runs first once the token
+needs rotating does it. A daily keepalive keeps idle accounts warm:
 
 ```bash
-# weekly cron — touches each home to trigger a refresh
-for h in ~/codex-homes/*/; do CODEX_HOME="$h" codex --version >/dev/null; done
+# daily cron — touches each home under the same lock the service uses
+0 4 * * * ~/codex-homes/refresh-tokens.sh >> ~/codex-homes/refresh-tokens.log 2>&1
 ```
+
+**Never point a home at a read-only auth.json.** Codex rotates the refresh
+token with the server and then writes it back; if the write can't land, the
+next run presents a token the server already retired, which is reuse. Reuse
+does not just kill that one home — OpenAI revokes every session belonging to
+that ChatGPT **user**, so two homes logged in as the same user die together
+(observed 2026-08-01: `refresh_token_invalidated` /
+`"Your session has ended. Please log in again."` across both of one user's
+homes within the same hour). Corollary for capacity planning: multiple homes
+on one ChatGPT user share a failure domain even when they sit in different
+workspaces.
+
+**Token audit trail:** every run fingerprints the home's `auth.json` before
+and after (sha256 prefix of the refresh token — never the token itself) and
+appends a line to `data/token-audit.log` when it rotated, or when a run was
+killed on timeout. Grep it first when accounts start failing auth:
+
+```bash
+grep '"rotated": true' data/token-audit.log | tail
+```
+
+A `timeout_kill` entry with `"rotated": true` is the dangerous case: the run
+was killed across a rotation, so the home may be holding a retired token.
 
 ## Troubleshooting
 

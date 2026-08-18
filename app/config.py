@@ -45,6 +45,7 @@ class Settings:
     cleanup_interval_hours: int
     # 有預設值：既有的呼叫端（測試、腳本）不必為了這個欄位全部改一輪
     session_retention_days: int = 3
+    cors_allow_origins: tuple[str, ...] = ()  # () = 不掛 CORS middleware,維持既有行為
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -70,6 +71,11 @@ class Settings:
             image_retention_days=_int_env("IMAGE_RETENTION_DAYS", 7),
             session_retention_days=_int_env("SESSION_RETENTION_DAYS", 3),
             cleanup_interval_hours=_int_env("CLEANUP_INTERVAL_HOURS", 6),
+            cors_allow_origins=tuple(
+                o.strip().rstrip("/")
+                for o in (os.getenv("CORS_ALLOW_ORIGINS") or "").split(",")
+                if o.strip()
+            ),
         )
 
     @property

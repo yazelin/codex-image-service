@@ -12,9 +12,11 @@
 #   Then set in .env (colon-separated paths as seen *inside the container*):
 #     CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
 #
-# Single-account fallback: leave CODEX_HOMES empty and the service uses the
-# container's default $HOME/.codex (mounted below as a thin compatibility
-# shim from ${HOME}/.codex if present).
+# Single-account setups still need a real, WRITABLE home: create one under
+# ~/codex-homes/ and list it in CODEX_HOMES. Leaving CODEX_HOMES empty falls
+# back to the container's own $HOME/.codex, which no longer carries any
+# credentials (see the volumes section for why the host's auth.json is not
+# mounted in).
 
 services:
   codex-image-service:
@@ -46,16 +48,19 @@ services:
     volumes:
       - ./data:/app/data
       - ./static/generated:/app/static/generated
-      # Single-account default mount: empty RW base + RO file overlays.
-      # Codex CLI needs to write sessions, history.jsonl, logs, PATH-update
-      # checks inside CODEX_HOME, so a flat :ro mount breaks startup with
-      # "failed to initialize in-process app-server client". The base
-      # `./data/codex-home` is a per-container scratch dir we create on
-      # build; the two file overlays keep auth.json / config.toml read-only
-      # so the host's interactive codex stays the source of truth for
-      # tokens. Override CODEX_HOMES in .env to point elsewhere.
+      # Container-default CODEX_HOME scratch dir. Codex CLI needs to write
+      # sessions, history.jsonl, logs and PATH-update checks inside
+      # CODEX_HOME, so this stays RW.
+      #
+      # The host's `~/.codex/auth.json` used to be overlaid here read-only as
+      # a single-account fallback. That was removed on 2026-08-03: a READ-ONLY
+      # auth.json is a token-reuse trap — codex rotates the refresh token with
+      # the server, cannot persist the new one, and the next run presents a
+      # token OpenAI已作廢 = reuse. Reuse revokes every session belonging to
+      # that ChatGPT *user*, so the trap can take down every pool home logged
+      # in as the same user along with it. Single-account setups should point
+      # CODEX_HOMES at a real writable home under ~/codex-homes/ instead.
       - ./data/codex-home:/home/app/.codex
-      - ${HOME}/.codex/auth.json:/home/app/.codex/auth.json:ro
       - ${HOME}/.codex/config.toml:/home/app/.codex/config.toml:ro
       # Multi-account parent dir. Each subdir under ~/codex-homes/ is a
       # service-dedicated CODEX_HOME (created via
