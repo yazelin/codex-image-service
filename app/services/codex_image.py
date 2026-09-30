@@ -22,7 +22,8 @@ from app.services import chatgpt_usage, storage
 
 logger = logging.getLogger(__name__)
 
-_SESSION_ID_RE = re.compile(r"^session id:\s*([0-9a-fA-F-]+)\s*$", re.MULTILINE)
+# 新版 codex 的 stderr 可能帶 ANSI 色碼（\x1b[1msession id:\x1b[0m），一併容忍
+_SESSION_ID_RE = re.compile(r"^(?:\x1b\[[0-9;]*m)*session id:(?:\x1b\[[0-9;]*m)*\s*([0-9a-fA-F-]+)\s*$", re.MULTILINE)
 
 # How long codex gets to shut down cleanly after SIGTERM before we SIGKILL it.
 # The point of the grace period is auth.json: if the run happens to be killed
@@ -198,6 +199,12 @@ def _find_image_in_rollout(
                 result = payload.get("result")
                 if isinstance(result, str) and result:
                     b64 = result  # keep the last (newest) image in the session
+            # Codex 0.159：event_msg 的 payload.type=item_completed，圖在 item.result（kind=image_gen.generation）
+            item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+            if payload.get("type") == "item_completed" and str(item.get("kind", "")).startswith("image_gen"):
+                result = item.get("result")
+                if isinstance(result, str) and result:
+                    b64 = result
     if not b64:
         return None
     try:
@@ -513,6 +520,7 @@ class CodexImageGenerator:
         last_message.unlink(missing_ok=True)
         command = [
             "codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only",
+            *(["-m", self.settings.codex_model] if self.settings.codex_model else []),
             "-C", str(run_dir),
             "--output-last-message", str(last_message),
             # 推理強度要釘住,不能吃 CODEX_HOME 裡那份 config 的預設(實測是
@@ -826,6 +834,7 @@ class CodexImageGenerator:
             "exec",
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
+            *(["-m", self.settings.codex_model] if self.settings.codex_model else []),
             "-C",
             str(run_dir),
         ]
