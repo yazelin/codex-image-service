@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -18,6 +20,15 @@ from app.services.storage import ensure_storage
 # 服務啟動時間。Overview 的 Uptime 用它 —— 姊妹服務 gemini-web 早就有這格，
 # 判「這台是不是剛被重啟過」時很常用（例如帳號 UI 變體修好後要確認生效）。
 _START_TIME = time.time()
+
+
+# 這個服務裡到處都有 logger.info(帳號輪替、判讀耗時、跨帳號重試的麵包屑),
+# 但一直沒有人設過 logging,root logger 停在 WARNING —— 那些 info 從上線到
+# 現在一行都沒印出來過。2026-08-06 查一筆判讀為什麼失敗時才發現。
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 
 @asynccontextmanager
