@@ -302,7 +302,17 @@ CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
 # hitting the wall and letting the existing retry handle it beats the
 # service refusing to work.
 CODEX_MIN_QUOTA_PERCENT=5
+# Model passed to `codex exec -m`. Empty = Codex's own default. Set it when the
+# default stops being available to ChatGPT accounts (2026-10: gpt-5.4 started
+# failing with "not supported when using Codex with a ChatGPT account").
+CODEX_MODEL=gpt-5.6-luna
 ```
+
+The image pins `@openai/codex@0.159.2`. From this version the generated image
+sits in the session rollout as an `event_msg` whose `payload.type` is
+`item_completed` (`payload.item.kind` = `image_gen.generation`, base64 in
+`payload.item.result`); older `image_generation_end` / `image_generation_call`
+events are still read. Bumping the Codex version means re-checking that shape.
 
 `docker-compose.yml` already mounts `~/codex-homes:/host_codex_homes`
 read-write (codex writes sessions and rotates tokens inside `CODEX_HOME`),
