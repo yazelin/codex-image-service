@@ -13,6 +13,7 @@ import re
 import signal
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app import db
@@ -224,6 +225,31 @@ def _detect_image_ext(data: bytes) -> str:
     if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
         return ".gif"
     return ".bin"
+
+
+_IMAGE_GEN_429_RE = re.compile(r"image generation failed: http 429[^\n]*usage_limit_reached[^\n]*")
+_RESETS_AT_RE = re.compile(r'resets_at\\*"\s*:\s*(\d+)')
+_TAIPEI = timezone(timedelta(hours=8))
+
+
+def _image_gen_limit_message(stderr: str) -> str | None:
+    """image_gen 被 429 usage_limit_reached 擋下時,回傳人看得懂的錯誤訊息。
+
+    Codex 碰到這個 429 不會非 0 退出,只會在 stderr 記一行 ERROR 然後用文字
+    回答,所以外層只看得到「rollout 裡沒有圖」。這個額度是 image_gen 專屬的,
+    和 wham/usage 的 5h/Weekly 窗不同,後台額度卡看不到。
+    """
+    match = _IMAGE_GEN_429_RE.search(stderr or "")
+    if not match:
+        return None
+    reset = _RESETS_AT_RE.search(match.group(0))
+    if not reset:
+        return "Codex image_gen 額度已用完(429 usage_limit_reached),重置時間未知"
+    reset_at = datetime.fromtimestamp(int(reset.group(1)), _TAIPEI)
+    return (
+        "Codex image_gen 額度已用完(429 usage_limit_reached),"
+        f"預計 {reset_at:%Y-%m-%d %H:%M} (+08:00) 重置"
+    )
 
 
 class CodexGenerationError(Exception):
@@ -697,7 +723,8 @@ class CodexImageGenerator:
                     output_path.write_bytes(rollout_bytes)
                 if not output_path.exists():
                     raise CodexGenerationError(
-                        f"Codex returned no image in the session rollout for {output_path}",
+                        _image_gen_limit_message(stderr)
+                        or f"Codex returned no image in the session rollout for {output_path}",
                         stdout="\n".join(stdout_parts),
                         stderr="\n".join(stderr_parts),
                         command=command_display,
