@@ -376,10 +376,11 @@ def set_setting(settings: Settings, key: str, value: str) -> None:
         )
 
 
-def per_account_stats(settings: Settings, days: int = 30) -> list[dict[str, Any]]:
-    """Return per-CODEX_HOME counts over the last `days` (default 30).
+def per_account_stats(settings: Settings, days: float = 30) -> list[dict[str, Any]]:
+    """Return per-CODEX_HOME counts over the last `days` (default 30; 小數可算小時窗).
 
-    Rows: {codex_home, total, succeeded, failed, last_seen}.
+    Rows: {codex_home, total, succeeded, failed, images, last_seen}.
+    images = 成功請求的張數加總（一筆請求可出多張），撞 ChatGPT 上限時看的是這個。
     Sorted by total desc so the most-used account leads in the UI.
     """
     cutoff_iso = (utc_now() - timedelta(days=days)).isoformat()
@@ -391,6 +392,7 @@ def per_account_stats(settings: Settings, days: int = 30) -> list[dict[str, Any]
                 COUNT(*) AS total,
                 SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
                 SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END) AS failed,
+                SUM(CASE WHEN status = 'succeeded' THEN count ELSE 0 END) AS images,
                 MAX(created_at) AS last_seen
             FROM image_requests
             WHERE created_at >= ?

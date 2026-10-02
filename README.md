@@ -335,7 +335,9 @@ count, success/failure split, a **24h success rate** (the 30-day total
 dilutes an account that only started failing this morning; consumers
 like catime fail over to gemini on error, so a dead account still looks
 like "images are coming out" from the outside — this number is the only
-place it shows), auth-token freshness (green ≤6d, amber
+place it shows), **images generated in the last 5h / 24h / 48h**
+(summed from succeeded requests — compare against when an account hits
+ChatGPT's image limit), auth-token freshness (green ≤6d, amber
 7–9d, red ≥10d since `last_refresh`), and the first 8 chars of the
 ChatGPT `account_id` so you can tell which is which. The History page
 gains an Account column with the chosen home (tooltip shows the full

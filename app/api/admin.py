@@ -324,6 +324,13 @@ def _overview_page(
     per_account = db.per_account_stats(settings, days=30)
     # 30 天的總量會把「今天早上才開始壞」稀釋掉；24h 那欄才抓得到現在的死活。
     per_account_24h = db.per_account_stats(settings, days=1)
+    # 撞 ChatGPT 生圖上限時要看「各帳號最近幾小時出了幾張」（2026-10-01 撞牆那次是手算的）。
+    # ponytail: 依賴 status 還沒被 cleanup 改成 expired，IMAGE_RETENTION_DAYS < 2 時 48h 會少算。
+    image_windows = {
+        "5h": db.per_account_stats(settings, days=5 / 24),
+        "24h": per_account_24h,
+        "48h": db.per_account_stats(settings, days=2),
+    }
     current_mode = codex_image.dispatch_mode(settings)
     homes_configured = getattr(settings, "codex_homes", ()) or ()
     body = f"""
@@ -338,7 +345,7 @@ def _overview_page(
         <div><strong>{stats['queued_count']}</strong><span>Queued / running</span></div>
         <div><strong>{_format_uptime(time.time() - _START_TIME)}</strong><span>Uptime</span></div>
       </section>
-      {_codex_accounts_section(homes_configured, per_account, per_account_24h, prefix, current_mode, usage_by_home)}
+      {_codex_accounts_section(homes_configured, per_account, per_account_24h, prefix, current_mode, usage_by_home, image_windows)}
       <section>
         <div class="section-title">
           <h2>Recent activity</h2>
@@ -388,6 +395,7 @@ def _codex_accounts_section(
     prefix: str = "",
     current_mode: str = "round-robin",
     usage_by_home: dict[str, dict[str, Any]] | None = None,
+    image_windows: dict[str, list[dict[str, Any]]] | None = None,
 ) -> str:
     """Render a card per Codex account in use, with usage stats + auth health.
 
@@ -405,6 +413,13 @@ def _codex_accounts_section(
 
     by_path = {row["codex_home"]: row for row in per_account}
     by_path_24h = {row["codex_home"]: row for row in (per_account_24h or [])}
+    images_by_window = {
+        label: {row["codex_home"]: int(row.get("images") or 0) for row in rows}
+        for label, rows in (image_windows or {}).items()
+    }
+
+    def images_for(home: str) -> dict[str, int]:
+        return {label: by_home.get(home, 0) for label, by_home in images_by_window.items()}
 
     cards = []
     seen: set[str] = set()
@@ -413,7 +428,8 @@ def _codex_accounts_section(
         stats = by_path.get(home, {"total": 0, "succeeded": 0, "failed": 0, "last_seen": None})
         cards.append(_codex_account_card(home, stats, configured=True,
                                          stats_24h=by_path_24h.get(home),
-                                         usage=(usage_by_home or {}).get(home)))
+                                         usage=(usage_by_home or {}).get(home),
+                                         images=images_for(home)))
 
     # also show any historical homes that appeared in DB but aren't currently configured
     for row in per_account:
@@ -421,7 +437,8 @@ def _codex_accounts_section(
         if h and h not in seen:
             cards.append(_codex_account_card(h, row, configured=False,
                                              stats_24h=by_path_24h.get(h),
-                                             usage=(usage_by_home or {}).get(h)))
+                                             usage=(usage_by_home or {}).get(h),
+                                             images=images_for(h)))
 
     multi = len(effective_homes) > 1
     subtitle = (
@@ -518,6 +535,7 @@ def _codex_account_card(
     configured: bool,
     stats_24h: dict[str, Any] | None = None,
     usage: dict[str, Any] | None = None,
+    images: dict[str, int] | None = None,
 ) -> str:
     """One CODEX_HOME → one card. Reads auth.json for last_refresh, account_id,
     and the access_token's actual JWT `exp`. Health chip + expiry text are
@@ -604,6 +622,7 @@ def _codex_account_card(
           <div><strong>{succeeded}</strong><span>Succeeded</span></div>
           <div><strong>{failed}</strong><span>Failed</span></div>
           <div><strong>{_success_rate_24h(stats_24h)}</strong><span>24h success</span></div>
+          {''.join(f"<div><strong>{n}</strong><span>Images {w}</span></div>" for w, n in (images or {}).items())}
           {_quota_cells(usage)}
         </div>
         <div class="account-footer">
