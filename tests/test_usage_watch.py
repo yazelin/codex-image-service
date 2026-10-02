@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app import db
-from app.api.admin import _rolling_48h, _usage_watch_section, _watch_level
+from app.api.admin import _hours_to_wall, _rolling_48h, _usage_watch_section, _watch_level
 from app.config import Settings
 
 
@@ -43,11 +43,12 @@ def test_rolling_window_and_levels():
         _row(s, "b", now - timedelta(hours=47), "succeeded", 3)     # 視窗最舊那一小時，還算
         _row(s, "c", now - timedelta(hours=48), "succeeded", 50)    # 剛滑出視窗
         _row(s, "d", now - timedelta(hours=1), "failed", 9)         # 失敗不算
-        times, series = _rolling_48h(s, ["/h/a", "/h/b"], now=now)
+        times, series, recent = _rolling_48h(s, ["/h/a", "/h/b"], now=now)
         assert len(times) == 168 and times[-1] == now.replace(minute=0)
         assert series["/h/a"][-1] == 5
         assert series["/h/a"][-2] == 3 + 50                        # 一小時前，48h 前那筆還在窗內
         assert series["/h/b"] == [0] * 168
+        assert len(recent["/h/a"]) == 48 and recent["/h/a"][-1] == 2 and recent["/h/a"][0] == 3
 
         assert _watch_level(0.69)[0] == "lvl-ok"
         assert _watch_level(0.7)[0] == "lvl-warn"
@@ -57,3 +58,14 @@ def test_rolling_window_and_levels():
         assert "<strong>5</strong> / 100 張" in page
         assert "撞牆線 100" in page
         assert page.count("<polyline") == 2
+
+
+def test_hours_to_wall():
+    # 已經到了
+    assert _hours_to_wall([10] * 48, wall=480) == 0
+    # 每小時穩定 5 張：滑出去的跟進來的一樣多，永遠停在 240
+    assert _hours_to_wall([5] * 48, wall=300) is None
+    # 前 24 小時 0、後 24 小時每小時 10：現在 240，每小時淨增 10（滑出去的是 0）→ 6 小時後到 300
+    assert _hours_to_wall([0] * 24 + [10] * 24, wall=300) == 6
+    # 前 24 小時很多、近 24 小時很少：48h 張數只會往下掉
+    assert _hours_to_wall([12] * 24 + [1] * 24, wall=320) is None

@@ -337,7 +337,9 @@ When more than one account is configured, the Overview also carries a
 
 The admin Overview opens with a **usage watch**: one bar per account showing
 images generated in the last 48h against `IMAGE_WALL_48H` (green below 70%,
-amber 70–90%, red above 90%, each with a text label), and a 7-day line chart
+amber 70–90%, red above 90%, each with a text label, plus an estimate of
+how many hours until the wall at the last-24h average pace — stepped hour by
+hour, so images sliding out of the 48h window are subtracted), and a 7-day line chart
 of each account's rolling 48h total with the wall drawn in. 48h is the window
 that matched the 2026-10-01 limit hit; the 5h and 24h totals had been higher
 before without getting blocked.

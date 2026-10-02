@@ -479,8 +479,11 @@ def _watch_level(ratio: float) -> tuple[str, str]:
 
 
 def _rolling_48h(settings: Any, homes: list[str], now: datetime | None = None,
-                 points: int = 168) -> tuple[list[datetime], dict[str, list[int]]]:
-    """每個帳號在最近 `points` 個整點，各自「往回 48 小時」的產圖張數。"""
+                 points: int = 168) -> tuple[list[datetime], dict[str, list[int]], dict[str, list[int]]]:
+    """每個帳號在最近 `points` 個整點，各自「往回 48 小時」的產圖張數。
+
+    第三個回傳值是每個帳號最近 48 個小時各自的張數（最後一格是這個小時），預估撞牆時間用。
+    """
     now = (now or datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
     buckets: dict[str, dict[str, int]] = {}
     for row in db.hourly_images(settings, hours=points + 48):
@@ -488,11 +491,38 @@ def _rolling_48h(settings: Any, homes: list[str], now: datetime | None = None,
     # 每小時的張數排成一條，再用滑動視窗加總
     span = [now - timedelta(hours=points + 46 - i) for i in range(points + 47)]
     times = span[47:]
-    series = {}
+    series, recent = {}, {}
     for home in homes:
         per_hour = [buckets.get(home, {}).get(t.strftime("%Y-%m-%dT%H"), 0) for t in span]
         series[home] = [sum(per_hour[i:i + 48]) for i in range(points)]
-    return times, series
+        recent[home] = per_hour[-48:]
+    return times, series, recent
+
+
+def _hours_to_wall(last_48h: list[int], wall: int) -> int | None:
+    """照近 24 小時的平均速度，再過幾小時「往回 48h 張數」會碰到撞牆線。
+
+    一小時一小時往後推：加上預計會產的張數，減掉滑出 48h 視窗的那一小時。
+    0 ＝已經到了；None ＝推 48 小時都碰不到。
+    ponytail: 速度假設固定為近 24h 平均，突然大量送圖時要過幾小時才反映出來。
+    """
+    window = list(last_48h[-48:])
+    if sum(window) >= wall:
+        return 0
+    rate = sum(window[-24:]) / 24
+    for hours in range(1, 49):
+        window = window[1:] + [rate]
+        if sum(window) >= wall:
+            return hours
+    return None
+
+
+def _eta_text(hours: int | None) -> str:
+    if hours is None:
+        return "照近 24h 速度，48 小時內不會到"
+    if hours == 0:
+        return "已到撞牆線"
+    return f"照近 24h 速度，約 {hours} 小時後到"
 
 
 def _usage_watch_section(settings: Any, homes: list[str]) -> str:
@@ -504,7 +534,7 @@ def _usage_watch_section(settings: Any, homes: list[str]) -> str:
     if not homes:
         return ""
     wall = max(1, int(getattr(settings, "image_wall_48h", 320) or 320))
-    times, series = _rolling_48h(settings, homes)
+    times, series, recent = _rolling_48h(settings, homes)
 
     rows = []
     for idx, home in enumerate(homes):
@@ -517,6 +547,7 @@ def _usage_watch_section(settings: Any, homes: list[str]) -> str:
             f"<span class='watch-name'><i style='background:{color}'></i>{html.escape(_short_home_label(home))}</span>"
             f"<span class='watch-meter'><span class='watch-fill {cls}' style='width:{min(100, ratio * 100):.1f}%'></span></span>"
             f"<span class='watch-num'><strong>{current}</strong> / {wall} 張</span>"
+            f"<span class='watch-eta'>{_eta_text(_hours_to_wall(recent[home], wall))}</span>"
             f"<span class='watch-lvl {cls}'>{label}</span>"
             f"</div>"
         )
@@ -1497,7 +1528,7 @@ _STYLES = """
   /* ---- codex accounts grid ---- */
   .watch-rows { display: grid; gap: 8px; margin-bottom: 18px; }
   .watch-row {
-    display: grid; grid-template-columns: minmax(120px, 200px) 1fr auto 72px;
+    display: grid; grid-template-columns: minmax(120px, 200px) 1fr auto 210px 72px;
     align-items: center; gap: 12px; font-size: 14px;
   }
   .watch-name { display: flex; align-items: center; gap: 8px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1509,6 +1540,7 @@ _STYLES = """
   .watch-fill.lvl-crit { background: #d03b3b; }
   .watch-num { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
   .watch-num strong { color: var(--ink); }
+  .watch-eta { font-size: 13px; color: var(--ink-soft); }
   .watch-lvl { font-size: 13px; font-weight: 600; }
   .watch-lvl.lvl-ok { color: #067a06; }
   .watch-lvl.lvl-warn { color: #9a6a00; }
@@ -1534,6 +1566,7 @@ _STYLES = """
   @media (max-width: 640px) {
     .watch-row { grid-template-columns: 1fr auto auto; }
     .watch-meter { grid-column: 1 / -1; grid-row: 2; }
+    .watch-eta { grid-column: 1 / -1; grid-row: 3; }
   }
   .account-grid {
     display: grid;
