@@ -69,3 +69,15 @@ def test_hours_to_wall():
     assert _hours_to_wall([0] * 24 + [10] * 24, wall=300) == 6
     # 前 24 小時很多、近 24 小時很少：48h 張數只會往下掉
     assert _hours_to_wall([12] * 24 + [1] * 24, wall=320) is None
+
+
+def test_quota_rows_show_used_percent_and_unknown():
+    from app.api.admin import _quota_watch_rows
+    usage = {"/h/a": {"windows": [
+        {"label": "5h", "remaining_percent": 98, "reset_at": None},
+        {"label": "Weekly", "remaining_percent": 8, "reset_at": None},
+    ]}}
+    page = _quota_watch_rows(["/h/a", "/h/b"], usage)
+    assert "已用 <strong>2%</strong>" in page
+    assert "已用 <strong>92%</strong>" in page and "lvl-crit" in page   # 週用了 92% → 危險
+    assert "查不到額度" in page                                          # /h/b 查不到，不畫成 0%
