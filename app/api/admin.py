@@ -346,7 +346,7 @@ def _overview_page(
         <div><strong>{stats['queued_count']}</strong><span>Queued / running</span></div>
         <div><strong>{_format_uptime(time.time() - _START_TIME)}</strong><span>Uptime</span></div>
       </section>
-      {_usage_watch_section(settings, _effective_homes(homes_configured))}
+      {_usage_watch_section(settings, _effective_homes(homes_configured), usage_by_home)}
       {_codex_accounts_section(homes_configured, per_account, per_account_24h, prefix, current_mode, usage_by_home, image_windows)}
       <section>
         <div class="section-title">
@@ -525,7 +525,44 @@ def _eta_text(hours: int | None) -> str:
     return f"照近 24h 速度，約 {hours} 小時後到"
 
 
-def _usage_watch_section(settings: Any, homes: list[str]) -> str:
+def _quota_watch_rows(homes: list[str], usage_by_home: dict[str, dict[str, Any]]) -> str:
+    """Codex 訂閱額度（5h／週）已用多少，每個帳號一列、每個 window 一條。
+
+    跟產圖張數是兩回事：這是 ChatGPT 回報的 Codex 用量 %，來源同帳號卡的 Quota left。
+    查不到就寫查不到，不畫成 0%。
+    """
+    rows = []
+    for idx, home in enumerate(homes):
+        color = _SERIES_COLORS[idx % len(_SERIES_COLORS)]
+        windows = (usage_by_home.get(home) or {}).get("windows") or []
+        cells = []
+        for w in windows:
+            used = 100 - int(w["remaining_percent"])
+            cls, label = _watch_level(used / 100)
+            reset_at = w.get("reset_at")
+            reset = ""
+            if reset_at:
+                left = reset_at - datetime.now(timezone.utc).timestamp()
+                reset = "，即將重置" if left <= 0 else f"，{_format_uptime(left)} 後重置"
+            cells.append(
+                f"<span class='quota-cell'>"
+                f"<span class='quota-label'>{html.escape(w['label'])}</span>"
+                f"<span class='watch-meter'><span class='watch-fill {cls}' style='width:{used}%'></span></span>"
+                f"<span class='quota-text'>已用 <strong>{used}%</strong>{reset}</span>"
+                f"<span class='watch-lvl {cls}'>{label}</span>"
+                f"</span>"
+            )
+        body = "".join(cells) or "<span class='muted'>查不到額度</span>"
+        rows.append(
+            f"<div class='quota-row'>"
+            f"<span class='watch-name'><i style='background:{color}'></i>{html.escape(_short_home_label(home))}</span>"
+            f"<span class='quota-cells'>{body}</span></div>"
+        )
+    return "".join(rows)
+
+
+def _usage_watch_section(settings: Any, homes: list[str],
+                         usage_by_home: dict[str, dict[str, Any]] | None = None) -> str:
     """用量警戒：每個帳號近 48h 張數對撞牆線，加近 7 天的 48h 累計折線。
 
     為什麼看 48h：2026-10-01 撞牆的分析裡，5h 和 24h 的量之前都超過也沒被擋，
@@ -596,9 +633,12 @@ def _usage_watch_section(settings: Any, homes: list[str]) -> str:
       <section class="watch">
         <div class="section-title">
           <h2>用量警戒</h2>
-          <span class="muted" style="font-size: 13px">每個帳號往回 48 小時產了幾張，對上次撞牆的張數；70% 以上注意，90% 以上危險</span>
+          <span class="muted" style="font-size: 13px">70% 以上注意，90% 以上危險</span>
         </div>
+        <h3 class="watch-sub">產圖張數（往回 48 小時）</h3>
         <div class="watch-rows">{''.join(rows)}</div>
+        <h3 class="watch-sub">Codex 額度（5 小時／週）</h3>
+        <div class="watch-rows">{_quota_watch_rows(homes, usage_by_home or {})}</div>
         <div class="watch-chart">
           <div class="watch-legend">{legend}<span class="muted">近 7 天，每小時一點，數值＝往回 48 小時累計張數</span></div>
           <div class="watch-plot">
@@ -1527,6 +1567,13 @@ _STYLES = """
 
   /* ---- codex accounts grid ---- */
   .watch-rows { display: grid; gap: 8px; margin-bottom: 18px; }
+  .watch-sub { font-size: 14px; font-weight: 600; color: var(--ink-soft); margin: 4px 0 8px; }
+  .quota-row { display: grid; grid-template-columns: minmax(120px, 200px) 1fr; align-items: center; gap: 12px; font-size: 14px; }
+  .quota-cells { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 6px 24px; }
+  .quota-cell { display: grid; grid-template-columns: 52px 1fr 190px 72px; align-items: center; gap: 10px; }
+  .quota-label { font-size: 13px; color: var(--muted); }
+  .quota-text { font-size: 13px; color: var(--ink-soft); white-space: nowrap; }
+  .quota-text strong { color: var(--ink); }
   .watch-row {
     display: grid; grid-template-columns: minmax(120px, 200px) 1fr auto 210px 72px;
     align-items: center; gap: 12px; font-size: 14px;
@@ -1567,6 +1614,10 @@ _STYLES = """
     .watch-row { grid-template-columns: 1fr auto auto; }
     .watch-meter { grid-column: 1 / -1; grid-row: 2; }
     .watch-eta { grid-column: 1 / -1; grid-row: 3; }
+    .quota-row { grid-template-columns: 1fr; }
+    .quota-cell { grid-template-columns: 52px 1fr; }
+    .quota-cell .watch-meter { grid-column: 1 / -1; }
+    .quota-cell .watch-lvl { display: none; }
   }
   .account-grid {
     display: grid;
