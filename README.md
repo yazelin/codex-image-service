@@ -306,6 +306,11 @@ CODEX_MIN_QUOTA_PERCENT=5
 # default stops being available to ChatGPT accounts (2026-10: gpt-5.4 started
 # failing with "not supported when using Codex with a ChatGPT account").
 CODEX_MODEL=gpt-5.6-luna
+# Per-account "images in the last 48h" line drawn on the Overview usage-watch
+# chart. Not an official number: on 2026-10-01 all five accounts hit ChatGPT's
+# image limit at 320–371 images over 48h; 320 is the lowest. Recalibrate after
+# the next hit.
+IMAGE_WALL_48H=320
 ```
 
 The image pins `@openai/codex@0.159.2`. From this version the generated image
@@ -329,6 +334,13 @@ When more than one account is configured, the Overview also carries a
 - `primary-first` — always start on the first account; the others only get
   used when it fails (the retry steps to the next one). Use this to keep a
   backup account's quota untouched, or when one account is on a better plan.
+
+The admin Overview opens with a **usage watch**: one bar per account showing
+images generated in the last 48h against `IMAGE_WALL_48H` (green below 70%,
+amber 70–90%, red above 90%, each with a text label), and a 7-day line chart
+of each account's rolling 48h total with the wall drawn in. 48h is the window
+that matched the 2026-10-01 limit hit; the 5h and 24h totals had been higher
+before without getting blocked.
 
 The admin Overview shows one card per account with a 30-day request
 count, success/failure split, a **24h success rate** (the 30-day total

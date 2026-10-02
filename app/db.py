@@ -407,6 +407,27 @@ def per_account_stats(settings: Settings, days: float = 30) -> list[dict[str, An
     return [dict(r) for r in rows]
 
 
+def hourly_images(settings: Settings, hours: int) -> list[dict[str, Any]]:
+    """最近 `hours` 小時每個帳號每小時成功產出的張數。
+
+    Rows: {codex_home, hour ('YYYY-MM-DDTHH', UTC), images}。沒產圖的小時不會有列。
+    """
+    cutoff_iso = (utc_now() - timedelta(hours=hours)).isoformat()
+    with connect(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT COALESCE(codex_home, '') AS codex_home,
+                   substr(created_at, 1, 13) AS hour,
+                   SUM(count) AS images
+            FROM image_requests
+            WHERE status = 'succeeded' AND created_at >= ?
+            GROUP BY codex_home, hour
+            """,
+            (cutoff_iso,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def dashboard_stats(settings: Settings) -> dict[str, int]:
     with connect(settings) as connection:
         api_key_count = connection.execute("SELECT COUNT(*) FROM api_keys").fetchone()[0]

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import html
+import json
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -345,6 +346,7 @@ def _overview_page(
         <div><strong>{stats['queued_count']}</strong><span>Queued / running</span></div>
         <div><strong>{_format_uptime(time.time() - _START_TIME)}</strong><span>Uptime</span></div>
       </section>
+      {_usage_watch_section(settings, _effective_homes(homes_configured))}
       {_codex_accounts_section(homes_configured, per_account, per_account_24h, prefix, current_mode, usage_by_home, image_windows)}
       <section>
         <div class="section-title">
@@ -458,6 +460,153 @@ def _codex_accounts_section(
         <div class="account-grid">{''.join(cards)}</div>
       </section>
     """
+
+
+# 帳號折線的顏色，依 CODEX_HOMES 的順序固定給（顏色跟著帳號，不跟著排名）。
+# 這五色在淺色底過了 dataviz 驗色（色盲相鄰可分）；其中三色對比 < 3:1，
+# 所以上面那排進度條一定要寫出數字與帳號名，不能只靠顏色。
+_SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
+_TPE = timezone(timedelta(hours=8))
+
+
+def _watch_level(ratio: float) -> tuple[str, str]:
+    """(css class, 標籤)。門檻是撞牆線的 70% / 90%。"""
+    if ratio >= 0.9:
+        return "lvl-crit", "■ 危險"
+    if ratio >= 0.7:
+        return "lvl-warn", "▲ 注意"
+    return "lvl-ok", "● 正常"
+
+
+def _rolling_48h(settings: Any, homes: list[str], now: datetime | None = None,
+                 points: int = 168) -> tuple[list[datetime], dict[str, list[int]]]:
+    """每個帳號在最近 `points` 個整點，各自「往回 48 小時」的產圖張數。"""
+    now = (now or datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
+    buckets: dict[str, dict[str, int]] = {}
+    for row in db.hourly_images(settings, hours=points + 48):
+        buckets.setdefault(row["codex_home"], {})[row["hour"]] = int(row["images"] or 0)
+    # 每小時的張數排成一條，再用滑動視窗加總
+    span = [now - timedelta(hours=points + 46 - i) for i in range(points + 47)]
+    times = span[47:]
+    series = {}
+    for home in homes:
+        per_hour = [buckets.get(home, {}).get(t.strftime("%Y-%m-%dT%H"), 0) for t in span]
+        series[home] = [sum(per_hour[i:i + 48]) for i in range(points)]
+    return times, series
+
+
+def _usage_watch_section(settings: Any, homes: list[str]) -> str:
+    """用量警戒：每個帳號近 48h 張數對撞牆線，加近 7 天的 48h 累計折線。
+
+    為什麼看 48h：2026-10-01 撞牆的分析裡，5h 和 24h 的量之前都超過也沒被擋，
+    只有「連續兩天累積」對得上撞牆的時間點。
+    """
+    if not homes:
+        return ""
+    wall = max(1, int(getattr(settings, "image_wall_48h", 320) or 320))
+    times, series = _rolling_48h(settings, homes)
+
+    rows = []
+    for idx, home in enumerate(homes):
+        current = series[home][-1]
+        ratio = current / wall
+        cls, label = _watch_level(ratio)
+        color = _SERIES_COLORS[idx % len(_SERIES_COLORS)]
+        rows.append(
+            f"<div class='watch-row'>"
+            f"<span class='watch-name'><i style='background:{color}'></i>{html.escape(_short_home_label(home))}</span>"
+            f"<span class='watch-meter'><span class='watch-fill {cls}' style='width:{min(100, ratio * 100):.1f}%'></span></span>"
+            f"<span class='watch-num'><strong>{current}</strong> / {wall} 張</span>"
+            f"<span class='watch-lvl {cls}'>{label}</span>"
+            f"</div>"
+        )
+
+    # ---- 折線圖（伺服器端畫 SVG，hover 用一小段 JS） ----
+    w, h, ml, mr, mt, mb = 960, 260, 44, 92, 12, 26
+    peak = max([wall] + [v for vals in series.values() for v in vals])
+    ymax = ((int(peak * 1.15) // 100) + 1) * 100
+    n = len(times)
+    def x(i: int) -> float:
+        return ml + (w - ml - mr) * i / max(1, n - 1)
+    def y(v: float) -> float:
+        return mt + (h - mt - mb) * (1 - v / ymax)
+
+    grid = "".join(
+        f"<line x1='{ml}' x2='{w - mr}' y1='{y(v):.1f}' y2='{y(v):.1f}' class='g'/>"
+        f"<text x='{ml - 6}' y='{y(v) + 4:.1f}' text-anchor='end' class='t'>{v}</text>"
+        for v in range(0, ymax + 1, 100)
+    )
+    xticks = "".join(
+        f"<text x='{x(i):.1f}' y='{h - 6}' text-anchor='middle' class='t'>{t.astimezone(_TPE):%m/%d}</text>"
+        for i, t in enumerate(times) if t.astimezone(_TPE).hour == 0
+    )
+    lines = "".join(
+        f"<polyline fill='none' stroke='{_SERIES_COLORS[k % len(_SERIES_COLORS)]}' stroke-width='2' "
+        f"stroke-linejoin='round' points='{' '.join(f'{x(i):.1f},{y(v):.1f}' for i, v in enumerate(series[home]))}'/>"
+        for k, home in enumerate(homes)
+    )
+    wall_line = (
+        f"<line x1='{ml}' x2='{w - mr}' y1='{y(wall):.1f}' y2='{y(wall):.1f}' class='wall'/>"
+        f"<text x='{w - mr + 6}' y='{y(wall) + 4:.1f}' class='t wall-t'>撞牆線 {wall}</text>"
+    )
+    data = {
+        "x0": ml, "x1": w - mr, "w": w,
+        "t": [t.astimezone(_TPE).strftime("%m/%d %H:00") for t in times],
+        "s": [{"n": _short_home_label(hm), "c": _SERIES_COLORS[k % len(_SERIES_COLORS)], "v": series[hm]}
+              for k, hm in enumerate(homes)],
+    }
+    # <script> 內容不解 HTML entity，只要擋 </ 免得提早關掉 script
+    data_json = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    legend = "".join(
+        f"<span><i style='background:{_SERIES_COLORS[k % len(_SERIES_COLORS)]}'></i>{html.escape(_short_home_label(hm))}</span>"
+        for k, hm in enumerate(homes)
+    )
+    return f"""
+      <section class="watch">
+        <div class="section-title">
+          <h2>用量警戒</h2>
+          <span class="muted" style="font-size: 13px">每個帳號往回 48 小時產了幾張，對上次撞牆的張數；70% 以上注意，90% 以上危險</span>
+        </div>
+        <div class="watch-rows">{''.join(rows)}</div>
+        <div class="watch-chart">
+          <div class="watch-legend">{legend}<span class="muted">近 7 天，每小時一點，數值＝往回 48 小時累計張數</span></div>
+          <div class="watch-plot">
+            <svg viewBox="0 0 {w} {h}" role="img" aria-label="各帳號往回 48 小時產圖張數，近 7 天">
+              {grid}{xticks}{wall_line}{lines}
+              <line class="cross" y1="{mt}" y2="{h - mb}" x1="0" x2="0" style="display:none"/>
+            </svg>
+            <div class="watch-tip" hidden></div>
+          </div>
+        </div>
+        <script type="application/json" id="watch-data">{data_json}</script>
+        <script>{_WATCH_JS}</script>
+      </section>
+    """
+
+
+_WATCH_JS = """
+(() => {
+  const d = JSON.parse(document.getElementById('watch-data').textContent);
+  const plot = document.querySelector('.watch-plot');
+  const svg = plot.querySelector('svg'), cross = svg.querySelector('.cross'), tip = plot.querySelector('.watch-tip');
+  const n = d.t.length;
+  plot.addEventListener('mousemove', (e) => {
+    const r = svg.getBoundingClientRect();
+    const sx = (e.clientX - r.left) * d.w / r.width;
+    const i = Math.round((sx - d.x0) / (d.x1 - d.x0) * (n - 1));
+    if (i < 0 || i >= n) { cross.style.display = 'none'; tip.hidden = true; return; }
+    const cx = d.x0 + (d.x1 - d.x0) * i / (n - 1);
+    cross.setAttribute('x1', cx); cross.setAttribute('x2', cx); cross.style.display = '';
+    const rows = d.s.slice().sort((a, b) => b.v[i] - a.v[i])
+      .map(s => `<div><i style="background:${s.c}"></i>${s.n}<b>${s.v[i]}</b></div>`).join('');
+    tip.innerHTML = `<div class="tip-t">${d.t[i]}</div>${rows}`;
+    tip.hidden = false;
+    const px = cx * r.width / d.w;
+    tip.style.left = (px > r.width / 2 ? px - tip.offsetWidth - 12 : px + 12) + 'px';
+  });
+  plot.addEventListener('mouseleave', () => { cross.style.display = 'none'; tip.hidden = true; });
+})();
+"""
 
 
 def _decode_access_token_exp(access_token: str) -> datetime | None:
@@ -1346,6 +1495,46 @@ _STYLES = """
   }
 
   /* ---- codex accounts grid ---- */
+  .watch-rows { display: grid; gap: 8px; margin-bottom: 18px; }
+  .watch-row {
+    display: grid; grid-template-columns: minmax(120px, 200px) 1fr auto 72px;
+    align-items: center; gap: 12px; font-size: 14px;
+  }
+  .watch-name { display: flex; align-items: center; gap: 8px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .watch-name i, .watch-legend i, .watch-tip i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; }
+  .watch-meter { height: 10px; border-radius: 5px; background: #eceaf2; overflow: hidden; }
+  .watch-fill { display: block; height: 100%; border-radius: 5px; }
+  .watch-fill.lvl-ok { background: #0ca30c; }
+  .watch-fill.lvl-warn { background: #fab219; }
+  .watch-fill.lvl-crit { background: #d03b3b; }
+  .watch-num { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  .watch-num strong { color: var(--ink); }
+  .watch-lvl { font-size: 13px; font-weight: 600; }
+  .watch-lvl.lvl-ok { color: #067a06; }
+  .watch-lvl.lvl-warn { color: #9a6a00; }
+  .watch-lvl.lvl-crit { color: #b02a2a; }
+  .watch-chart { background: var(--card); border: 1px solid var(--card-edge); border-radius: 14px; padding: 12px 14px 6px; }
+  .watch-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; margin-bottom: 6px; align-items: center; }
+  .watch-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .watch-plot { position: relative; }
+  .watch-plot svg { width: 100%; height: auto; display: block; }
+  .watch-plot .g { stroke: #ece6e8; stroke-width: 1; }
+  .watch-plot .t { fill: var(--muted); font-size: 11px; }
+  .watch-plot .wall { stroke: #d03b3b; stroke-width: 1.5; stroke-dasharray: 6 4; }
+  .watch-plot .wall-t { fill: #b02a2a; font-weight: 600; }
+  .watch-plot .cross { stroke: var(--ink-soft); stroke-width: 1; }
+  .watch-tip {
+    position: absolute; top: 8px; pointer-events: none;
+    background: #fff; border: 1px solid var(--card-edge); border-radius: 10px;
+    box-shadow: var(--shadow-sm); padding: 8px 10px; font-size: 12.5px; min-width: 170px;
+  }
+  .watch-tip .tip-t { color: var(--muted); margin-bottom: 4px; }
+  .watch-tip div:not(.tip-t) { display: flex; align-items: center; gap: 6px; }
+  .watch-tip b { margin-left: auto; font-variant-numeric: tabular-nums; }
+  @media (max-width: 640px) {
+    .watch-row { grid-template-columns: 1fr auto auto; }
+    .watch-meter { grid-column: 1 / -1; grid-row: 2; }
+  }
   .account-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
