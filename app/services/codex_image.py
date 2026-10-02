@@ -261,12 +261,16 @@ class CodexGenerationError(Exception):
         stderr: str = "",
         command: str = "",
         workdir: Path | None = None,
+        codex_home: str | None = None,
     ) -> None:
         super().__init__(message)
         self.stdout = stdout
         self.stderr = stderr
         self.command = command
         self.workdir = workdir
+        # 失敗也要記是哪個帳號，否則 Overview 帳號卡的 Failed 永遠是 0
+        #（撞生圖上限的那些請求就這樣全部消失在帳號統計外）。
+        self.codex_home = codex_home
 
 
 @dataclass
@@ -729,6 +733,7 @@ class CodexImageGenerator:
                         stderr="\n".join(stderr_parts),
                         command=command_display,
                         workdir=run_dir,
+                        codex_home=codex_home_used,
                     )
                 image_paths.append(output_path)
 
@@ -749,6 +754,7 @@ class CodexImageGenerator:
                         stderr="\n".join(stderr_parts),
                         command=command_display,
                         workdir=run_dir,
+                        codex_home=codex_home_used,
                     )
                 db.record_output_sha(self.settings, request_id, sha)
         except Exception:
@@ -808,6 +814,8 @@ class CodexImageGenerator:
                 return command, stdout, stderr, picked_home
             except CodexGenerationError as exc:
                 last_error = exc
+                # ponytail: 換帳號重試時只記最後一個帳號；第一個帳號失敗、第二個成功的那次不會算進第一個的 Failed。
+                exc.codex_home = exc.codex_home or picked_home
                 if attempt + 1 >= max_attempts:
                     raise
                 # Don't bail — try the next home. Surface the prior failure

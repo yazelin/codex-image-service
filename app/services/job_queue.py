@@ -186,6 +186,7 @@ class ImageJobQueue:
                 stderr=exc.stderr,
                 workdir=exc.workdir,
                 codex_command=exc.command,
+                codex_home=exc.codex_home,
             )
             if not job.future.done():
                 job.future.set_exception(GenerationJobFailed(str(exc)))

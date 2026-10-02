@@ -278,12 +278,14 @@ def mark_image_request_failed(
     duration_seconds: float | None = None,
     workdir: Path | None = None,
     codex_command: str = "",
+    codex_home: str | None = None,
 ) -> None:
     with connect(settings) as connection:
         connection.execute(
             """
             UPDATE image_requests
             SET status = 'failed',
+                codex_home = COALESCE(?, codex_home),
                 error = ?,
                 stdout = ?,
                 stderr = ?,
@@ -294,6 +296,7 @@ def mark_image_request_failed(
             WHERE id = ?
             """,
             (
+                codex_home,
                 error,
                 stdout,
                 stderr,
