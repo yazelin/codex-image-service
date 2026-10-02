@@ -51,6 +51,9 @@ class Settings:
     codex_min_quota_percent: int = 5
     # codex exec 用的模型（-m）。空字串＝吃 codex 自己的預設。2026-10-01 預設 gpt-5.4 被 ChatGPT 帳號停用才加。
     codex_model: str = ""
+    # 單一帳號「往回 48 小時產圖張數」的撞牆線。不是官方數字：2026-10-01 五個帳號
+    # 撞 ChatGPT 生圖上限時量到 320–371 張，取最低的 320。下次撞牆用新數字校正。
+    image_wall_48h: int = 320
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -66,6 +69,7 @@ class Settings:
             codex_timeout_seconds=_int_env("CODEX_TIMEOUT_SECONDS", 360),
             codex_min_quota_percent=_int_env("CODEX_MIN_QUOTA_PERCENT", 5),
             codex_model=os.getenv("CODEX_MODEL", "").strip(),
+            image_wall_48h=_int_env("IMAGE_WALL_48H", 320),
             codex_workdir=Path(os.getenv("CODEX_WORKDIR", "./data/codex-runs")),
             codex_worker_concurrency=_int_env("CODEX_WORKER_CONCURRENCY", 2),
             codex_homes=tuple(
