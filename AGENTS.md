@@ -81,4 +81,19 @@ else:
 3. `docker compose -f docker-compose.local.yml up -d --build`，`curl http://localhost:8000/health` 回 `{"status":"ok"}`。
 4. 開 `http://localhost:8000/admin` 登入，發一把金鑰。
 
+### 一個帳號還是多個帳號
+
+用哪個帳號只看 `CODEX_HOMES` 有沒有設，跟電腦是哪一台無關：
+
+- **沒設 `CODEX_HOMES`**：`docker-compose.local.yml` 會把這台電腦的 `~/.codex/auth.json` 唯讀掛進去，用的就是上面 `codex login` 的那一個帳號。
+- **多個帳號輪流**：每個帳號先各登入一次（由人操作）：
+  ```bash
+  mkdir -p ~/codex-homes/甲 && CODEX_HOME=~/codex-homes/甲 codex login
+  mkdir -p ~/codex-homes/乙 && CODEX_HOME=~/codex-homes/乙 codex login
+  ```
+  再在 `.env` 設 `CODEX_HOMES=/host_codex_homes/甲:/host_codex_homes/乙`（`~/codex-homes` 在容器裡掛成 `/host_codex_homes`）。每次請求換下一個帳號，失敗會換帳號重試，週額度剩不到 `CODEX_MIN_QUOTA_PERCENT`（預設 5）% 的帳號先跳過。
+- `docker-compose.yml`（掛在 nginx 後面那份）**不會**掛主機的 `auth.json`，用它就一定要設 `CODEX_HOMES`，不然沒有帳號可用。
+
+分辨一台機器現在用哪種：`docker inspect <容器名> --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'` 看是哪份 compose，再看環境變數裡有沒有 `CODEX_HOMES`。
+
 只在自己電腦上用，程式連 `localhost:8000` 就好。GitHub Actions 這類在別台機器上跑的程式連不到 `localhost`，要讓它們用，服務需要一個外面連得到的網址（最好是 HTTPS）：自己的網域加 nginx（README 的 Production 一節），或 Cloudflare Tunnel、Tailscale Funnel、ngrok 這類通道，不用自己開 port（這幾種作者沒有實測過）。
