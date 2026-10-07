@@ -77,9 +77,12 @@ don't), the raw MP4 lives at
    will run the container, and `codex login` completed.
 2. Docker + Docker Compose.
 3. Only if callers on *other* machines need it (GitHub Actions, a Cloudflare
-   Worker, a teammate): a reverse proxy (e.g. nginx) terminating HTTPS for the
-   domain you want to expose. Scripts and AI agents on the same machine can
-   call `http://localhost:8000` directly — see the local quickstart below.
+   Worker, a teammate): a URL they can reach, ideally HTTPS. Either your own
+   domain with a reverse proxy (e.g. nginx, see Production below) or a tunnel
+   such as Cloudflare Tunnel, Tailscale Funnel or ngrok, which needs no open
+   port (the tunnels are untested by the author). Scripts and AI agents on the
+   same machine can call `http://localhost:8000` directly; see the local
+   quickstart below.
 
 ## Quickstart — local testing (no nginx)
 
