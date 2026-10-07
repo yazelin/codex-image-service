@@ -81,4 +81,4 @@ else:
 3. `docker compose -f docker-compose.local.yml up -d --build`，`curl http://localhost:8000/health` 回 `{"status":"ok"}`。
 4. 開 `http://localhost:8000/admin` 登入，發一把金鑰。
 
-只在自己電腦上用不需要反向代理。GitHub Actions 這類在別台機器上跑的程式連不到 `localhost`，要讓它們用，才需要網域、HTTPS 和 nginx（README 的 Production 一節）。
+只在自己電腦上用，程式連 `localhost:8000` 就好。GitHub Actions 這類在別台機器上跑的程式連不到 `localhost`，要讓它們用，服務需要一個外面連得到的網址（最好是 HTTPS）：自己的網域加 nginx（README 的 Production 一節），或 Cloudflare Tunnel、Tailscale Funnel、ngrok 這類通道，不用自己開 port（這幾種作者沒有實測過）。
