@@ -76,8 +76,10 @@ don't), the raw MP4 lives at
 1. [Codex CLI](https://github.com/openai/codex) installed on the host that
    will run the container, and `codex login` completed.
 2. Docker + Docker Compose.
-3. A reverse proxy in front of the container (e.g. nginx) terminating HTTPS
-   for the domain you want to expose.
+3. Only if callers on *other* machines need it (GitHub Actions, a Cloudflare
+   Worker, a teammate): a reverse proxy (e.g. nginx) terminating HTTPS for the
+   domain you want to expose. Scripts and AI agents on the same machine can
+   call `http://localhost:8000` directly — see the local quickstart below.
 
 ## Quickstart — local testing (no nginx)
 
@@ -114,6 +116,21 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 This uses the host's own `~/.codex/auth.json` directly, no bind-mount.
+
+### Calling it from this machine
+
+Scripts, Claude Code, Codex and other agents on the same machine use
+`http://localhost:8000` with a key issued in `/admin`:
+
+```bash
+export CODEX_IMAGE_KEY=cimg_...          # from /admin → API Keys
+curl -sS --fail --max-time 650 -X POST http://localhost:8000/v1/images/generate \
+  -H "Authorization: Bearer $CODEX_IMAGE_KEY" -H "Content-Type: application/json" \
+  -d '{"prompt":"a cute orange cat, watercolor"}'
+```
+
+For AI agents, point them at [`AGENTS.md`](AGENTS.md) (中文): endpoints,
+fields, a Python submit-and-poll example, and error handling.
 
 ## Production — behind your existing nginx
 
