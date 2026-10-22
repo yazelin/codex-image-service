@@ -628,48 +628,70 @@ def _daily_counts(settings: Any, homes: list[str], now: datetime | None = None,
     return dates, per
 
 
-def _daily_chart(settings: Any, homes: list[str], now: datetime | None = None) -> str:
-    """每天一根堆疊長條：高度＝當天合計（標在頂上），依帳號分色；滑鼠移上去看各帳號張數。"""
-    dates, per = _daily_counts(settings, homes, now)
-    today = dates[-1]
-    totals = [sum(per.get((h, d), 0) for h in homes) for d in dates]
+def _stacked_bars(homes: list[str], labels: list[str], per: list[dict[str, int]], aria: str,
+                  every: int = 1) -> str:
+    """堆疊長條：一個時段一根，高度＝合計（標在頂上，0 不標），依帳號分色；滑鼠移上去看各帳號。
+
+    labels 與 per 一一對應（per[i] = {home: 張數}）；x 軸文字每 `every` 根標一次，免得擠在一起。
+    """
+    totals = [sum(p.get(hm, 0) for hm in homes) for p in per]
     w, h, ml, mr, mt, mb = 960, 240, 44, 16, 22, 26
-    ymax = max(100, ((int(max(totals) * 1.1) // 100) + 1) * 100)
+    top_v = max(totals + [1])
+    tick = next(t for t in (10, 20, 50, 100, 200, 300, 500, 1000, 2000) if top_v * 1.1 / t <= 5)
+    ymax = (int(top_v * 1.1) // tick + 1) * tick
     y = lambda v: mt + (h - mt - mb) * (1 - v / ymax)
-    slot = (w - ml - mr) / len(dates)
+    slot = (w - ml - mr) / len(labels)
     bw = min(64, slot * 0.6)
-    grid = "".join(
+    out = "".join(
         f"<line x1='{ml}' x2='{w - mr}' y1='{y(v):.1f}' y2='{y(v):.1f}' class='g'/>"
         f"<text x='{ml - 6}' y='{y(v) + 4:.1f}' text-anchor='end' class='t'>{v}</text>"
-        for v in range(0, ymax + 1, max(100, ymax // 5 // 100 * 100))
+        for v in range(0, ymax + 1, tick)
     )
-    bars = ""
-    for i, (d, total) in enumerate(zip(dates, totals)):
+    for i, (label, p, total) in enumerate(zip(labels, per, totals)):
         x0 = ml + slot * i + (slot - bw) / 2
         base = 0
         for k, home in enumerate(homes):
-            n = per.get((home, d), 0)
+            n = p.get(home, 0)
             if n:
-                # 段與段之間留 2px 底色空隙；量少的日子段很薄，空隙跟著縮，免得整段被吃掉
+                # 段與段之間留 2px 底色空隙；量少時段很薄，空隙跟著縮，免得整段被吃掉
                 top, bottom = y(base + n), y(base)
-                bars += (f"<rect x='{x0:.1f}' y='{top:.1f}' width='{bw:.1f}' height='{max(1, bottom - top - min(2, (bottom - top) / 3)):.1f}'"
-                         f" fill='{_SERIES_COLORS[k % len(_SERIES_COLORS)]}'/>")
+                out += (f"<rect x='{x0:.1f}' y='{top:.1f}' width='{bw:.1f}' height='{max(1, bottom - top - min(2, (bottom - top) / 3)):.1f}'"
+                        f" fill='{_SERIES_COLORS[k % len(_SERIES_COLORS)]}'/>")
                 base += n
-        label = f"{d:%m/%d}" + ("（今天）" if d == today else "")
-        tip = f"{label} 合計 {total} 張\n" + "\n".join(
-            f"{_short_home_label(hm)}：{per.get((hm, d), 0)}" for hm in homes)
-        bars += (f"<text x='{x0 + bw / 2:.1f}' y='{y(total) - 6:.1f}' text-anchor='middle' class='v'>{total}</text>"
-                 f"<text x='{x0 + bw / 2:.1f}' y='{h - 6}' text-anchor='middle' class='t'>{label}</text>"
-                 f"<rect x='{ml + slot * i:.1f}' y='{mt}' width='{slot:.1f}' height='{h - mt - mb}' class='hit'>"
-                 f"<title>{html.escape(tip)}</title></rect>")
+        tip = f"{label} 合計 {total} 張\n" + "\n".join(f"{_short_home_label(hm)}：{p.get(hm, 0)}" for hm in homes)
+        if total:
+            out += f"<text x='{x0 + bw / 2:.1f}' y='{y(total) - 6:.1f}' text-anchor='middle' class='v'>{total}</text>"
+        if i % every == 0 or i == len(labels) - 1:
+            out += f"<text x='{x0 + bw / 2:.1f}' y='{h - 6}' text-anchor='middle' class='t'>{label}</text>"
+        out += (f"<rect x='{ml + slot * i:.1f}' y='{mt}' width='{slot:.1f}' height='{h - mt - mb}' class='hit'>"
+                f"<title>{html.escape(tip)}</title></rect>")
     legend = "".join(
         f"<span><i style='background:{_SERIES_COLORS[k % len(_SERIES_COLORS)]}'></i>{html.escape(_short_home_label(hm))}</span>"
         for k, hm in enumerate(homes)
     )
     return (f"<div class='watch-chart'><div class='watch-legend'>{legend}"
-            f"<span class='muted'>柱頂數字＝當天合計，滑鼠移上去看各帳號</span></div><div class='watch-plot'>"
-            f"<svg viewBox='0 0 {w} {h}' role='img' aria-label='各帳號每天產圖張數，近 7 天'>{grid}{bars}</svg>"
-            f"</div></div>")
+            f"<span class='muted'>柱頂數字＝合計，滑鼠移上去看各帳號</span></div><div class='watch-plot'>"
+            f"<svg viewBox='0 0 {w} {h}' role='img' aria-label='{aria}'>{out}</svg></div></div>")
+
+
+def _daily_chart(settings: Any, homes: list[str], now: datetime | None = None) -> str:
+    dates, per = _daily_counts(settings, homes, now)
+    labels = [f"{d:%m/%d}" + ("（今天）" if d == dates[-1] else "") for d in dates]
+    return _stacked_bars(homes, labels, [{hm: per.get((hm, d), 0) for hm in homes} for d in dates],
+                         "各帳號每天產圖張數，近 7 天")
+
+
+def _hourly_chart(settings: Any, homes: list[str], now: datetime | None = None) -> str:
+    """近 24 小時每小時一根（台灣時間，最右邊是這個小時，還沒過完）。"""
+    now = (now or datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
+    hours = [now - timedelta(hours=23 - i) for i in range(24)]
+    per: dict[str, dict[str, int]] = {}
+    for row in db.hourly_images(settings, hours=25):
+        per.setdefault(row["hour"], {})[row["codex_home"]] = int(row["images"] or 0)
+    labels = [f"{t.astimezone(_TPE):%H}時" for t in hours]
+    labels[-1] += "（現在）"
+    return _stacked_bars(homes, labels, [per.get(t.strftime("%Y-%m-%dT%H"), {}) for t in hours],
+                         "各帳號每小時產圖張數，近 24 小時", every=3)
 
 
 def _usage_watch_section(settings: Any, homes: list[str],
@@ -741,6 +763,8 @@ def _usage_watch_section(settings: Any, homes: list[str],
         <div class="watch-rows">{_quota_watch_rows(homes, usage_by_home or {})}</div>
         <h3 class="watch-sub">每天產圖張數（近 7 天，台灣時間）</h3>
         {_daily_chart(settings, homes)}
+        <h3 class="watch-sub">每小時產圖張數（近 24 小時，台灣時間）</h3>
+        {_hourly_chart(settings, homes)}
         <h3 class="watch-sub">往回 24 小時產圖張數（近 7 天，每小時一點）</h3>
         <div class="watch-chart">
           <div class="watch-legend">{legend}<span class="muted">空心圓＝撞牆</span></div>

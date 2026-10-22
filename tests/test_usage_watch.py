@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app import db
-from app.api.admin import _daily_chart, _daily_counts, _rolling_24h, _usage_watch_section, _watch_level
+from app.api.admin import _daily_chart, _daily_counts, _hourly_chart, _rolling_24h, _usage_watch_section, _watch_level
 from app.config import Settings
 
 
@@ -94,3 +94,16 @@ def test_daily_chart_uses_taipei_days():
         page = _daily_chart(s, ["/h/a", "/h/b"], now=now)
         assert "10/22（今天） 合計 2 張" in page and "10/21 合計 7 張" in page
         assert page.count("<rect") == 3 + 7                                          # 三段長條＋每天一個滑鼠熱區
+
+
+def test_hourly_chart_last_24_hours():
+    with TemporaryDirectory() as d:
+        s = _settings(Path(d))
+        now = datetime(2026, 10, 22, 4, 20, tzinfo=timezone.utc)                    # 台灣 12:20
+        _row(s, "a", datetime(2026, 10, 22, 4, 5, tzinfo=timezone.utc), "succeeded", 2)   # 這個小時
+        _row(s, "b", datetime(2026, 10, 21, 5, 10, tzinfo=timezone.utc), "expired", 3)    # 23 小時前，還在
+        _row(s, "c", datetime(2026, 10, 21, 4, 59, tzinfo=timezone.utc), "succeeded", 9)  # 24 小時前，滑出去
+        _row(s, "d", datetime(2026, 10, 22, 4, 6, tzinfo=timezone.utc), "succeeded", 4, home="/h/b")
+        page = _hourly_chart(s, ["/h/a", "/h/b"], now=now)
+        assert "12時（現在） 合計 6 張" in page and "13時 合計 3 張" in page and "合計 9 張" not in page
+        assert page.count("class='hit'") == 24
