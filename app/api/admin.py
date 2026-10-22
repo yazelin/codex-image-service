@@ -612,6 +612,27 @@ def _wall_log_html(events: list[dict[str, Any]], per_home: dict[str, dict[str, i
     """
 
 
+def _daily_table(settings: Any, homes: list[str], now: datetime | None = None, days: int = 7) -> str:
+    """近 `days` 天（台灣時間，含今天）每個帳號每天產圖張數，新的在左。"""
+    today = (now or datetime.now(timezone.utc)).astimezone(_TPE).date()
+    dates = [today - timedelta(days=i) for i in range(days)]
+    per: dict[tuple[str, Any], int] = {}
+    for row in db.hourly_images(settings, hours=days * 24 + 8):
+        d = datetime.strptime(row["hour"], "%Y-%m-%dT%H").replace(tzinfo=timezone.utc).astimezone(_TPE).date()
+        per[(row["codex_home"], d)] = per.get((row["codex_home"], d), 0) + int(row["images"] or 0)
+    head = "".join(f"<th>{d:%m/%d}{'（今天）' if d == today else ''}</th>" for d in dates)
+    body = ""
+    for idx, home in enumerate(homes):
+        color = _SERIES_COLORS[idx % len(_SERIES_COLORS)]
+        body += (
+            f"<tr><td><span class='watch-name'><i style='background:{color}'></i>{html.escape(_short_home_label(home))}</span></td>"
+            + "".join(f"<td>{per.get((home, d), 0)}</td>" for d in dates) + "</tr>"
+        )
+    body += "<tr class='total'><td>合計</td>" + "".join(
+        f"<td><strong>{sum(per.get((h, d), 0) for h in homes)}</strong></td>" for d in dates) + "</tr>"
+    return f"<div class='table-wrap'><table class='daily'><thead><tr><th>帳號</th>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+
+
 def _usage_watch_section(settings: Any, homes: list[str],
                          usage_by_home: dict[str, dict[str, Any]] | None = None) -> str:
     """用量警戒：撞牆紀錄、Codex 5h／週額度，加近 7 天各帳號往回 24h 張數折線。
@@ -678,8 +699,11 @@ def _usage_watch_section(settings: Any, homes: list[str],
         {_wall_log_html(events, per_home, homes)}
         <h3 class="watch-sub">Codex 額度（5 小時／週）</h3>
         <div class="watch-rows">{_quota_watch_rows(homes, usage_by_home or {})}</div>
+        <h3 class="watch-sub">每天產圖張數（近 7 天，台灣時間）</h3>
+        {_daily_table(settings, homes)}
+        <h3 class="watch-sub">往回 24 小時產圖張數（近 7 天，每小時一點）</h3>
         <div class="watch-chart">
-          <div class="watch-legend">{legend}<span class="muted">近 7 天，每小時一點，數值＝往回 24 小時累計張數，空心圓＝撞牆</span></div>
+          <div class="watch-legend">{legend}<span class="muted">空心圓＝撞牆</span></div>
           <div class="watch-plot">
             <svg viewBox="0 0 {w} {h}" role="img" aria-label="各帳號往回 24 小時產圖張數，近 7 天">
               {grid}{xticks}{lines}{dots}
@@ -1640,6 +1664,9 @@ _STYLES = """
   .watch-plot .g { stroke: #ece6e8; stroke-width: 1; }
   .watch-plot .t { fill: var(--muted); font-size: 11px; }
   .watch-plot .wall-dot { fill: #fff; stroke-width: 2.5; }
+  .daily td, .daily th { text-align: right; font-variant-numeric: tabular-nums; }
+  .daily td:first-child, .daily th:first-child { text-align: left; }
+  .daily tr.total td { border-top: 2px solid var(--card-edge); }
   .watch-plot .cross { stroke: var(--ink-soft); stroke-width: 1; }
   .watch-tip {
     position: absolute; top: 8px; pointer-events: none;
