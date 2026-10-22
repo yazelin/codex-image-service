@@ -478,51 +478,21 @@ def _watch_level(ratio: float) -> tuple[str, str]:
     return "lvl-ok", "● 正常"
 
 
-def _rolling_48h(settings: Any, homes: list[str], now: datetime | None = None,
-                 points: int = 168) -> tuple[list[datetime], dict[str, list[int]], dict[str, list[int]]]:
-    """每個帳號在最近 `points` 個整點，各自「往回 48 小時」的產圖張數。
-
-    第三個回傳值是每個帳號最近 48 個小時各自的張數（最後一格是這個小時），預估撞牆時間用。
-    """
+def _rolling_24h(settings: Any, homes: list[str], now: datetime | None = None,
+                 points: int = 168) -> tuple[list[datetime], dict[str, list[int]]]:
+    """每個帳號在最近 `points` 個整點，各自「往回 24 小時」的產圖張數。"""
     now = (now or datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
     buckets: dict[str, dict[str, int]] = {}
-    for row in db.hourly_images(settings, hours=points + 48):
+    for row in db.hourly_images(settings, hours=points + 24):
         buckets.setdefault(row["codex_home"], {})[row["hour"]] = int(row["images"] or 0)
     # 每小時的張數排成一條，再用滑動視窗加總
-    span = [now - timedelta(hours=points + 46 - i) for i in range(points + 47)]
-    times = span[47:]
-    series, recent = {}, {}
+    span = [now - timedelta(hours=points + 22 - i) for i in range(points + 23)]
+    times = span[23:]
+    series = {}
     for home in homes:
         per_hour = [buckets.get(home, {}).get(t.strftime("%Y-%m-%dT%H"), 0) for t in span]
-        series[home] = [sum(per_hour[i:i + 48]) for i in range(points)]
-        recent[home] = per_hour[-48:]
-    return times, series, recent
-
-
-def _hours_to_wall(last_48h: list[int], wall: int) -> int | None:
-    """照近 24 小時的平均速度，再過幾小時「往回 48h 張數」會碰到撞牆線。
-
-    一小時一小時往後推：加上預計會產的張數，減掉滑出 48h 視窗的那一小時。
-    0 ＝已經到了；None ＝推 48 小時都碰不到。
-    ponytail: 速度假設固定為近 24h 平均，突然大量送圖時要過幾小時才反映出來。
-    """
-    window = list(last_48h[-48:])
-    if sum(window) >= wall:
-        return 0
-    rate = sum(window[-24:]) / 24
-    for hours in range(1, 49):
-        window = window[1:] + [rate]
-        if sum(window) >= wall:
-            return hours
-    return None
-
-
-def _eta_text(hours: int | None) -> str:
-    if hours is None:
-        return "照近 24h 速度，48 小時內不會到"
-    if hours == 0:
-        return "已到撞牆線"
-    return f"照近 24h 速度，約 {hours} 小時後到"
+        series[home] = [sum(per_hour[i:i + 24]) for i in range(points)]
+    return times, series
 
 
 def _quota_watch_rows(homes: list[str], usage_by_home: dict[str, dict[str, Any]]) -> str:
@@ -613,15 +583,14 @@ def _wall_log(settings: Any, homes: list[str],
     return events[::-1], per_home
 
 
-def _wall_log_html(settings: Any, homes: list[str]) -> str:
-    events, per_home = _wall_log(settings, homes)
+def _wall_log_html(events: list[dict[str, Any]], per_home: dict[str, dict[str, int]], homes: list[str]) -> str:
     fmt = lambda t: t.astimezone(_TPE).strftime("%m/%d %H:%M")
     rows = []
     for idx, home in enumerate(homes):
         color = _SERIES_COLORS[idx % len(_SERIES_COLORS)]
         p = per_home[home]
         rows.append(
-            f"<div class='watch-row'>"
+            f"<div class='watch-row wall-row'>"
             f"<span class='watch-name'><i style='background:{color}'></i>{html.escape(_short_home_label(home))}</span>"
             f"<span class='watch-num'>近 24h <strong>{p['now_24h']}</strong> 張</span>"
             f"<span class='watch-eta'>沒被擋過的最高 24h：{p['max_24h_ok']} 張</span>"
@@ -645,38 +614,22 @@ def _wall_log_html(settings: Any, homes: list[str]) -> str:
 
 def _usage_watch_section(settings: Any, homes: list[str],
                          usage_by_home: dict[str, dict[str, Any]] | None = None) -> str:
-    """用量警戒：每個帳號近 48h 張數對撞牆線，加近 7 天的 48h 累計折線。
+    """用量警戒：撞牆紀錄、Codex 5h／週額度，加近 7 天各帳號往回 24h 張數折線。
 
-    為什麼看 48h：2026-10-01 撞牆的分析裡，5h 和 24h 的量之前都超過也沒被擋，
-    只有「連續兩天累積」對得上撞牆的時間點。
+    不畫固定撞牆線：2026-10-22 查證窗是滾動 24h，但撞牆張數 77～160 都有、之後 296 也沒擋，
+    任何一條固定線都會兩邊錯。改在折線上標出實際撞牆的點。
     """
     if not homes:
         return ""
-    wall = max(1, int(getattr(settings, "image_wall_48h", 320) or 320))
-    times, series, recent = _rolling_48h(settings, homes)
-
-    rows = []
-    for idx, home in enumerate(homes):
-        current = series[home][-1]
-        ratio = current / wall
-        cls, label = _watch_level(ratio)
-        color = _SERIES_COLORS[idx % len(_SERIES_COLORS)]
-        rows.append(
-            f"<div class='watch-row'>"
-            f"<span class='watch-name'><i style='background:{color}'></i>{html.escape(_short_home_label(home))}</span>"
-            f"<span class='watch-meter'><span class='watch-fill {cls}' style='width:{min(100, ratio * 100):.1f}%'></span></span>"
-            f"<span class='watch-num'><strong>{current}</strong> / {wall} 張</span>"
-            f"<span class='watch-eta'>{_eta_text(_hours_to_wall(recent[home], wall))}</span>"
-            f"<span class='watch-lvl {cls}'>{label}</span>"
-            f"</div>"
-        )
+    events, per_home = _wall_log(settings, homes)
+    times, series = _rolling_24h(settings, homes)
 
     # ---- 折線圖（伺服器端畫 SVG，hover 用一小段 JS） ----
-    w, h, ml, mr, mt, mb = 960, 260, 44, 92, 12, 26
-    peak = max([wall] + [v for vals in series.values() for v in vals])
+    w, h, ml, mr, mt, mb = 960, 260, 44, 16, 12, 26
+    peak = max([100] + [v for vals in series.values() for v in vals])
     ymax = ((int(peak * 1.15) // 100) + 1) * 100
     n = len(times)
-    def x(i: int) -> float:
+    def x(i: float) -> float:
         return ml + (w - ml - mr) * i / max(1, n - 1)
     def y(v: float) -> float:
         return mt + (h - mt - mb) * (1 - v / ymax)
@@ -695,9 +648,14 @@ def _usage_watch_section(settings: Any, homes: list[str],
         f"stroke-linejoin='round' points='{' '.join(f'{x(i):.1f},{y(v):.1f}' for i, v in enumerate(series[home]))}'/>"
         for k, home in enumerate(homes)
     )
-    wall_line = (
-        f"<line x1='{ml}' x2='{w - mr}' y1='{y(wall):.1f}' y2='{y(wall):.1f}' class='wall'/>"
-        f"<text x='{w - mr + 6}' y='{y(wall) + 4:.1f}' class='t wall-t'>撞牆線 {wall}</text>"
+    # 撞牆點：畫在第一次被擋的時間、撞牆時往回 24h 張數；帳號不明的沒有張數，不畫
+    t0, step = times[0], timedelta(hours=1)
+    dots = "".join(
+        f"<circle cx='{x((e['first'] - t0) / step):.1f}' cy='{y(e['images_24h']):.1f}' r='5' class='wall-dot'"
+        f" stroke='{_SERIES_COLORS[homes.index(e['home']) % len(_SERIES_COLORS)]}'>"
+        f"<title>{html.escape(_short_home_label(e['home']))} 撞牆 {e['first'].astimezone(_TPE):%m/%d %H:%M}，往回 24h {e['images_24h']} 張</title></circle>"
+        for e in events
+        if e["home"] in homes and e["images_24h"] is not None and t0 <= e["first"] <= times[-1] + step
     )
     data = {
         "x0": ml, "x1": w - mr, "w": w,
@@ -717,16 +675,14 @@ def _usage_watch_section(settings: Any, homes: list[str],
           <h2>用量警戒</h2>
           <span class="muted" style="font-size: 13px">70% 以上注意，90% 以上危險</span>
         </div>
-        {_wall_log_html(settings, homes)}
-        <h3 class="watch-sub">產圖張數（往回 48 小時）</h3>
-        <div class="watch-rows">{''.join(rows)}</div>
+        {_wall_log_html(events, per_home, homes)}
         <h3 class="watch-sub">Codex 額度（5 小時／週）</h3>
         <div class="watch-rows">{_quota_watch_rows(homes, usage_by_home or {})}</div>
         <div class="watch-chart">
-          <div class="watch-legend">{legend}<span class="muted">近 7 天，每小時一點，數值＝往回 48 小時累計張數</span></div>
+          <div class="watch-legend">{legend}<span class="muted">近 7 天，每小時一點，數值＝往回 24 小時累計張數，空心圓＝撞牆</span></div>
           <div class="watch-plot">
-            <svg viewBox="0 0 {w} {h}" role="img" aria-label="各帳號往回 48 小時產圖張數，近 7 天">
-              {grid}{xticks}{wall_line}{lines}
+            <svg viewBox="0 0 {w} {h}" role="img" aria-label="各帳號往回 24 小時產圖張數，近 7 天">
+              {grid}{xticks}{lines}{dots}
               <line class="cross" y1="{mt}" y2="{h - mb}" x1="0" x2="0" style="display:none"/>
             </svg>
             <div class="watch-tip" hidden></div>
@@ -1671,6 +1627,7 @@ _STYLES = """
   .watch-num { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
   .watch-num strong { color: var(--ink); }
   .watch-eta { font-size: 13px; color: var(--ink-soft); }
+  .watch-row.wall-row { grid-template-columns: minmax(120px, 200px) auto 1fr; }
   .watch-lvl { font-size: 13px; font-weight: 600; }
   .watch-lvl.lvl-ok { color: #067a06; }
   .watch-lvl.lvl-warn { color: #9a6a00; }
@@ -1682,8 +1639,7 @@ _STYLES = """
   .watch-plot svg { width: 100%; height: auto; display: block; }
   .watch-plot .g { stroke: #ece6e8; stroke-width: 1; }
   .watch-plot .t { fill: var(--muted); font-size: 11px; }
-  .watch-plot .wall { stroke: #d03b3b; stroke-width: 1.5; stroke-dasharray: 6 4; }
-  .watch-plot .wall-t { fill: #b02a2a; font-weight: 600; }
+  .watch-plot .wall-dot { fill: #fff; stroke-width: 2.5; }
   .watch-plot .cross { stroke: var(--ink-soft); stroke-width: 1; }
   .watch-tip {
     position: absolute; top: 8px; pointer-events: none;

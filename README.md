@@ -326,10 +326,6 @@ CODEX_MIN_QUOTA_PERCENT=5
 # default stops being available to ChatGPT accounts (2026-10: gpt-5.4 started
 # failing with "not supported when using Codex with a ChatGPT account").
 CODEX_MODEL=gpt-5.6-luna
-# Per-account "images in the last 48h" line drawn on the Overview usage-watch
-# chart. Not an official number, and the 2026-10-22 recheck showed 48h is the
-# wrong window (see the wall log below); kept only as a visual reference line.
-IMAGE_WALL_48H=320
 ```
 
 The image pins `@openai/codex@0.159.2`. From this version the generated image
@@ -368,16 +364,14 @@ fixed wall: accounts were blocked at 77–160 images per 24h on 2026-09-30 to
 10-03, then made 296 per 24h without a block from 10-04 on, so the cap is not
 a fixed image count. The log records the real number each time instead.
 
-Then one bar per account showing
-images generated in the last 48h against `IMAGE_WALL_48H` (green below 70%,
-amber 70–90%, red above 90%, each with a text label, plus an estimate of
-how many hours until the wall at the last-24h average pace — stepped hour by
-hour, so images sliding out of the 48h window are subtracted), and a 7-day line chart
-of each account's rolling 48h total with the wall drawn in. Under the image bars, each account's Codex quota
-(5h and weekly, from the same usage API as the account cards) is shown as
-used-% bars with the same 70/90% levels and the reset countdown. The 48h
-window came from the 2026-10-01 hit alone and turned out not to match the
-reset times; treat these bars as a pace indicator, not a limit.
+Then each account's Codex quota (5h and weekly, from the same usage API as the
+account cards) as used-% bars (green below 70%, amber 70–90%, red above 90%,
+each with a text label) with the reset countdown, and a 7-day line chart of
+each account's rolling 24h image total. Blocks from the wall log are drawn on
+the chart as hollow dots at the time of the first block and the 24h total at
+that moment. There is no fixed wall line: an earlier version drew one at 320
+images per 48h, taken from the 2026-10-01 block alone, and it was wrong both
+ways (accounts were blocked well below it, and later ran above it unblocked).
 
 The admin Overview shows one card per account with a 30-day request
 count, success/failure split, a **24h success rate** (the 30-day total

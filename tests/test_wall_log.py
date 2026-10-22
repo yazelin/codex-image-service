@@ -50,11 +50,11 @@ def test_wall_events_and_safe_floor():
         assert per["/h/a"] == {"now_24h": 4 + 7 + 2, "max_24h_ok": 9}   # 只算解除之後
         assert per["/h/b"] == {"now_24h": 5, "max_24h_ok": 5}            # 沒撞過就看全部
 
-        page = _wall_log_html(s, ["/h/a", "/h/b"])
+        page = _wall_log_html(events, per, ["/h/a", "/h/b"])
         assert "帳號不明" in page and "<strong>7</strong>" in page and "最高 24h：9 張" in page
 
 
 def test_no_walls():
     with TemporaryDirectory() as d:
         s = _settings(Path(d))
-        assert "還沒撞過牆" in _wall_log_html(s, ["/h/a"])
+        assert "還沒撞過牆" in _wall_log_html(*_wall_log(s, ["/h/a"]), ["/h/a"])
