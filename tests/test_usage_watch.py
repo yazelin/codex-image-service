@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app import db
-from app.api.admin import _hours_to_wall, _rolling_48h, _usage_watch_section, _watch_level
+from app.api.admin import _rolling_24h, _usage_watch_section, _watch_level
 from app.config import Settings
 
 
@@ -20,7 +20,6 @@ def _settings(tmp: Path):
         codex_timeout_seconds=5, codex_workdir=tmp, codex_worker_concurrency=1,
         codex_homes=("/h/a", "/h/b"), generation_queue_max_size=1,
         request_wait_timeout_seconds=5, image_retention_days=7, cleanup_interval_hours=6,
-        image_wall_48h=100,
     )
     db.init_db(s)
     return s
@@ -40,35 +39,34 @@ def test_rolling_window_and_levels():
         s = _settings(Path(d))
         now = datetime.now(timezone.utc).replace(minute=30, second=0, microsecond=0)
         _row(s, "a", now - timedelta(minutes=10), "succeeded", 2)   # 這個小時
-        _row(s, "b", now - timedelta(hours=47), "succeeded", 3)     # 視窗最舊那一小時，還算
-        _row(s, "c", now - timedelta(hours=48), "succeeded", 50)    # 剛滑出視窗
+        _row(s, "b", now - timedelta(hours=23), "expired", 3)       # 視窗最舊那一小時，過保留期也要算
+        _row(s, "c", now - timedelta(hours=24), "succeeded", 50)    # 剛滑出視窗
         _row(s, "d", now - timedelta(hours=1), "failed", 9)         # 失敗不算
-        times, series, recent = _rolling_48h(s, ["/h/a", "/h/b"], now=now)
+        times, series = _rolling_24h(s, ["/h/a", "/h/b"], now=now)
         assert len(times) == 168 and times[-1] == now.replace(minute=0)
         assert series["/h/a"][-1] == 5
-        assert series["/h/a"][-2] == 3 + 50                        # 一小時前，48h 前那筆還在窗內
+        assert series["/h/a"][-2] == 3 + 50                        # 一小時前，24h 前那筆還在窗內
         assert series["/h/b"] == [0] * 168
-        assert len(recent["/h/a"]) == 48 and recent["/h/a"][-1] == 2 and recent["/h/a"][0] == 3
 
         assert _watch_level(0.69)[0] == "lvl-ok"
         assert _watch_level(0.7)[0] == "lvl-warn"
         assert _watch_level(0.9)[0] == "lvl-crit"
 
         page = _usage_watch_section(s, ["/h/a", "/h/b"])
-        assert "<strong>5</strong> / 100 張" in page
-        assert "撞牆線 100" in page
+        assert "撞牆線" not in page
         assert page.count("<polyline") == 2
 
 
-def test_hours_to_wall():
-    # 已經到了
-    assert _hours_to_wall([10] * 48, wall=480) == 0
-    # 每小時穩定 5 張：滑出去的跟進來的一樣多，永遠停在 240
-    assert _hours_to_wall([5] * 48, wall=300) is None
-    # 前 24 小時 0、後 24 小時每小時 10：現在 240，每小時淨增 10（滑出去的是 0）→ 6 小時後到 300
-    assert _hours_to_wall([0] * 24 + [10] * 24, wall=300) == 6
-    # 前 24 小時很多、近 24 小時很少：48h 張數只會往下掉
-    assert _hours_to_wall([12] * 24 + [1] * 24, wall=320) is None
+def test_wall_dot_on_chart():
+    from tests.test_wall_log import _429, _row as wrow
+    with TemporaryDirectory() as d:
+        s = _settings(Path(d))
+        now = datetime.now(timezone.utc)
+        wrow(s, "ok", now - timedelta(hours=10), "/h/a", 4)
+        reset = int((now + timedelta(hours=14)).timestamp())
+        wrow(s, "x", now - timedelta(hours=5), "/h/a", error="limit", stderr=_429 % reset, status="failed")
+        page = _usage_watch_section(s, ["/h/a", "/h/b"])
+        assert page.count("class='wall-dot'") == 1 and "往回 24h 4 張" in page
 
 
 def test_quota_rows_show_used_percent_and_unknown():

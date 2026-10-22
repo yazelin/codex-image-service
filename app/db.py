@@ -411,6 +411,7 @@ def hourly_images(settings: Settings, hours: int) -> list[dict[str, Any]]:
     """最近 `hours` 小時每個帳號每小時成功產出的張數。
 
     Rows: {codex_home, hour ('YYYY-MM-DDTHH', UTC), images}。沒產圖的小時不會有列。
+    過了保留期的成功請求會變 expired，一樣要算，否則折線最舊那幾天會掉下去。
     """
     cutoff_iso = (utc_now() - timedelta(hours=hours)).isoformat()
     with connect(settings) as connection:
@@ -420,7 +421,7 @@ def hourly_images(settings: Settings, hours: int) -> list[dict[str, Any]]:
                    substr(created_at, 1, 13) AS hour,
                    SUM(count) AS images
             FROM image_requests
-            WHERE status = 'succeeded' AND created_at >= ?
+            WHERE status IN ('succeeded', 'expired') AND COALESCE(error, '') = '' AND created_at >= ?
             GROUP BY codex_home, hour
             """,
             (cutoff_iso,),
