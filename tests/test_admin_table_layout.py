@@ -14,7 +14,7 @@ def test_tables_are_wrapped_for_horizontal_scroll():
     assert ".table-wrap { overflow-x: auto" in admin._STYLES
     opens = admin.__dict__  # noqa: F841  (只是為了讓 import 生效)
     src = open(admin.__file__).read()
-    assert src.count("<div class='table-wrap'><table>") == src.count("</tbody></table></div>")
+    assert src.count("<div class='table-wrap'><table") == src.count("</tbody></table></div>")
     assert src.count("<div class='table-wrap'><table>") >= 2  # History + API Keys
 
 
