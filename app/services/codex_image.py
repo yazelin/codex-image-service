@@ -239,6 +239,43 @@ def image_gen_resets_at(stderr: str) -> int | None:
     return int(reset.group(1)) if reset else None
 
 
+IMAGE_GEN_COOLDOWN_KEY = "image_gen_cooldowns"
+
+
+def image_gen_cooldowns(settings: Settings, now: float | None = None) -> dict[str, int]:
+    """image_gen 額度用完、還沒到重置時間的帳號 → resets_at（epoch 秒）。
+
+    這個額度 wham/usage 看不到（只有 5h／Weekly 窗），只能從撞過的 429 知道;
+    記在 DB（app_settings），服務重啟也記得。讀不到或格式壞了一律當成沒有冷卻。
+    """
+    now = time.time() if now is None else now
+    try:
+        stored = json.loads(db.get_setting(settings, IMAGE_GEN_COOLDOWN_KEY, "{}") or "{}")
+    except Exception:
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    return {home: int(reset) for home, reset in stored.items()
+            if isinstance(reset, (int, float)) and reset > now}
+
+
+def note_image_gen_cooldown(settings: Settings, home: str | None, stderr: str,
+                            now: float | None = None) -> int | None:
+    """這一次在 home 上撞到 image_gen 429 usage_limit_reached：記下冷卻到 resets_at 並回傳；沒撞到回 None。
+
+    寫回時順便丟掉已經過了重置時間的帳號。
+    ponytail: 兩個 worker 同時寫可能蓋掉對方剛記的一筆；被蓋掉的帳號下次派到會再撞一次、再記一次。
+    """
+    now = time.time() if now is None else now
+    reset = image_gen_resets_at(stderr)
+    if not home or reset is None or reset <= now:
+        return None
+    cool = image_gen_cooldowns(settings, now)
+    cool[home] = max(cool.get(home, 0), reset)
+    db.set_setting(settings, IMAGE_GEN_COOLDOWN_KEY, json.dumps(cool))
+    return reset
+
+
 def _image_gen_limit_message(stderr: str) -> str | None:
     """image_gen 被 429 usage_limit_reached 擋下時,回傳人看得懂的錯誤訊息。
 
@@ -465,6 +502,22 @@ class CodexImageGenerator:
             return [None]
         base = await self._claim_primary_base()
         ordered = [homes[(base + i) % len(homes)] for i in range(len(homes))]
+
+        # image_gen 額度用完的帳號冷卻到重置時間（撞過一次才知道，見 note_image_gen_cooldown）。
+        # 全部都在冷卻就照舊輪，跟額度見底同一條保守規則。
+        try:
+            cool = image_gen_cooldowns(self.settings)
+        except Exception as exc:  # 讀冷卻壞掉不該影響出圖
+            logger.warning("image_gen cooldown lookup failed: %s", exc)
+            cool = {}
+        ready = [home for home in ordered if home not in cool]
+        if cool and ready and len(ready) < len(ordered):
+            logger.info(
+                "skipping image_gen cooldown homes: %s",
+                ", ".join(f"{Path(h).name} until {datetime.fromtimestamp(cool[h], _TAIPEI):%m-%d %H:%M}"
+                          for h in ordered if h in cool),
+            )
+            ordered = ready
 
         threshold = self.settings.codex_min_quota_percent
         if threshold <= 0:
@@ -823,6 +876,10 @@ class CodexImageGenerator:
                 last_error = exc
                 # ponytail: 換帳號重試時只記最後一個帳號；第一個帳號失敗、第二個成功的那次不會算進第一個的 Failed。
                 exc.codex_home = exc.codex_home or picked_home
+                try:  # 這個帳號的 image_gen 額度用完：冷卻到重置時間，之後的請求先不派給它
+                    note_image_gen_cooldown(self.settings, picked_home, exc.stderr or "")
+                except Exception as note_exc:  # 記冷卻壞掉不該影響出圖
+                    logger.warning("could not record image_gen cooldown: %s", note_exc)
                 if attempt + 1 >= max_attempts:
                     raise
                 # Don't bail — try the next home. Surface the prior failure

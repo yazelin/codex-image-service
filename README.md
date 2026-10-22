@@ -322,6 +322,12 @@ CODEX_HOMES=/host_codex_homes/personal:/host_codex_homes/team
 # hitting the wall and letting the existing retry handle it beats the
 # service refusing to work.
 CODEX_MIN_QUOTA_PERCENT=5
+# image_gen has its own quota that wham/usage does not show (only the 5h /
+# Weekly windows are visible). When an account hits it, Codex logs
+# `image generation failed: http 429 ... usage_limit_reached` with a
+# `resets_at`; the service then keeps that account out of the rotation until
+# that time (stored in the DB, so it survives restarts). No setting needed.
+# If every account is cooling down, none is skipped (same rule as above).
 # Model passed to `codex exec -m`. Empty = Codex's own default. Set it when the
 # default stops being available to ChatGPT accounts (2026-10: gpt-5.4 started
 # failing with "not supported when using Codex with a ChatGPT account").
