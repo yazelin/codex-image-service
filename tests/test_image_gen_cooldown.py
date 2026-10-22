@@ -136,3 +136,33 @@ def test_重試時第一個帳號撞到額度就記下冷卻():
             assert tried[0] not in asyncio.run(gen._rotation())
         finally:
             chatgpt_usage.fetch_many = original
+
+
+def test_codex_正常結束但沒有圖也記下冷卻():
+    # .11 實際的樣子（2026-10-23）：Codex 撞到 image_gen 429 照樣 exit 0，
+    # 是 generate() 後面「rollout 裡沒有圖」那一步才失敗；#44 只在重試那段記冷卻，部署後 yaze-fr 照樣被派了 18 次。
+    with TemporaryDirectory() as d:
+        s = _settings(Path(d))
+        gen = CodexImageGenerator(s)
+        reset = int(time.time()) + 3600
+        tried = []
+
+        async def fake_once(*, codex_home=None, **_):
+            tried.append(codex_home)
+            return "codex exec", "", _limit_stderr(reset)
+
+        async def fake_fetch(homes):
+            return {}
+        gen._run_codex_once = fake_once
+        original = chatgpt_usage.fetch_many
+        chatgpt_usage.fetch_many = fake_fetch
+        try:
+            try:
+                asyncio.run(gen.generate(request_id="r1", prompt="p", size="1024x1024", quality="high", count=1))
+                raise AssertionError("沒有圖應該失敗")
+            except CodexGenerationError as exc:
+                assert "額度已用完" in str(exc)
+            assert codex_image.image_gen_cooldowns(s) == {tried[0]: reset}
+            assert tried[0] not in asyncio.run(gen._rotation())
+        finally:
+            chatgpt_usage.fetch_many = original
