@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app import db
-from app.api.admin import _daily_table, _rolling_24h, _usage_watch_section, _watch_level
+from app.api.admin import _daily_chart, _daily_counts, _rolling_24h, _usage_watch_section, _watch_level
 from app.config import Settings
 
 
@@ -81,15 +81,16 @@ def test_quota_rows_show_used_percent_and_unknown():
     assert "查不到額度" in page                                          # /h/b 查不到，不畫成 0%
 
 
-def test_daily_table_uses_taipei_days():
+def test_daily_chart_uses_taipei_days():
     with TemporaryDirectory() as d:
         s = _settings(Path(d))
         now = datetime(2026, 10, 22, 4, 0, tzinfo=timezone.utc)                    # 台灣 10/22 12:00
         _row(s, "a", datetime(2026, 10, 21, 17, 0, tzinfo=timezone.utc), "succeeded", 2)  # 台灣 10/22 01:00
         _row(s, "b", datetime(2026, 10, 21, 15, 0, tzinfo=timezone.utc), "expired", 3)    # 台灣 10/21 23:00
         _row(s, "c", datetime(2026, 10, 21, 15, 0, tzinfo=timezone.utc), "succeeded", 4, home="/h/b")
-        page = _daily_table(s, ["/h/a", "/h/b"], now=now)
-        cells = [r.split("<td>")[2:4] for r in page.split("<tr")[2:]]               # 每列前兩天：今天、昨天
-        assert cells[0] == ["2</td>", "3</td>"] and cells[1] == ["0</td>", "4</td>"]
-        assert "<strong>2</strong>" in page and "<strong>7</strong>" in page          # 合計
-        assert "10/22（今天）" in page and "10/16" in page and "10/15" not in page
+        dates, per = _daily_counts(s, ["/h/a", "/h/b"], now=now)
+        assert f"{dates[0]:%m/%d}" == "10/16" and f"{dates[-1]:%m/%d}" == "10/22"
+        assert per[("/h/a", dates[-1])] == 2 and per[("/h/a", dates[-2])] == 3 and per[("/h/b", dates[-2])] == 4
+        page = _daily_chart(s, ["/h/a", "/h/b"], now=now)
+        assert "10/22（今天） 合計 2 張" in page and "10/21 合計 7 張" in page
+        assert page.count("<rect") == 3 + 7                                          # 三段長條＋每天一個滑鼠熱區

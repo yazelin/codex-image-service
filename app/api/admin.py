@@ -583,7 +583,9 @@ def _wall_log(settings: Any, homes: list[str],
     return events[::-1], per_home
 
 
-def _wall_log_html(events: list[dict[str, Any]], per_home: dict[str, dict[str, int]], homes: list[str]) -> str:
+def _wall_log_html(events: list[dict[str, Any]], per_home: dict[str, dict[str, int]],
+                   homes: list[str]) -> tuple[str, str]:
+    """回傳 (各帳號近 24h 那幾行, 撞牆歷史表)；表是歷史紀錄，放在整塊最下面。"""
     fmt = lambda t: t.astimezone(_TPE).strftime("%m/%d %H:%M")
     rows = []
     for idx, home in enumerate(homes):
@@ -606,31 +608,68 @@ def _wall_log_html(events: list[dict[str, Any]], per_home: dict[str, dict[str, i
     return f"""
         <h3 class="watch-sub">生圖額度（滾動 24 小時，上限張數不固定）</h3>
         <div class="watch-rows">{''.join(rows)}</div>
+    """, f"""
+        <h3 class="watch-sub">撞牆歷史</h3>
         <div class='table-wrap'><table><thead><tr>
           <th>帳號</th><th>第一次被擋</th><th>最後一次被擋</th><th>解除</th><th>被擋筆數</th><th>撞牆時往回 24h 張數</th>
         </tr></thead><tbody>{trs}</tbody></table></div>
     """
 
 
-def _daily_table(settings: Any, homes: list[str], now: datetime | None = None, days: int = 7) -> str:
-    """近 `days` 天（台灣時間，含今天）每個帳號每天產圖張數，新的在左。"""
+def _daily_counts(settings: Any, homes: list[str], now: datetime | None = None,
+                  days: int = 7) -> tuple[list[Any], dict[tuple[str, Any], int]]:
+    """近 `days` 天（台灣時間，含今天，舊到新）每個帳號每天產圖張數。"""
     today = (now or datetime.now(timezone.utc)).astimezone(_TPE).date()
-    dates = [today - timedelta(days=i) for i in range(days)]
+    dates = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
     per: dict[tuple[str, Any], int] = {}
     for row in db.hourly_images(settings, hours=days * 24 + 8):
         d = datetime.strptime(row["hour"], "%Y-%m-%dT%H").replace(tzinfo=timezone.utc).astimezone(_TPE).date()
         per[(row["codex_home"], d)] = per.get((row["codex_home"], d), 0) + int(row["images"] or 0)
-    head = "".join(f"<th>{d:%m/%d}{'（今天）' if d == today else ''}</th>" for d in dates)
-    body = ""
-    for idx, home in enumerate(homes):
-        color = _SERIES_COLORS[idx % len(_SERIES_COLORS)]
-        body += (
-            f"<tr><td><span class='watch-name'><i style='background:{color}'></i>{html.escape(_short_home_label(home))}</span></td>"
-            + "".join(f"<td>{per.get((home, d), 0)}</td>" for d in dates) + "</tr>"
-        )
-    body += "<tr class='total'><td>合計</td>" + "".join(
-        f"<td><strong>{sum(per.get((h, d), 0) for h in homes)}</strong></td>" for d in dates) + "</tr>"
-    return f"<div class='table-wrap'><table class='daily'><thead><tr><th>帳號</th>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+    return dates, per
+
+
+def _daily_chart(settings: Any, homes: list[str], now: datetime | None = None) -> str:
+    """每天一根堆疊長條：高度＝當天合計（標在頂上），依帳號分色；滑鼠移上去看各帳號張數。"""
+    dates, per = _daily_counts(settings, homes, now)
+    today = dates[-1]
+    totals = [sum(per.get((h, d), 0) for h in homes) for d in dates]
+    w, h, ml, mr, mt, mb = 960, 240, 44, 16, 22, 26
+    ymax = max(100, ((int(max(totals) * 1.1) // 100) + 1) * 100)
+    y = lambda v: mt + (h - mt - mb) * (1 - v / ymax)
+    slot = (w - ml - mr) / len(dates)
+    bw = min(64, slot * 0.6)
+    grid = "".join(
+        f"<line x1='{ml}' x2='{w - mr}' y1='{y(v):.1f}' y2='{y(v):.1f}' class='g'/>"
+        f"<text x='{ml - 6}' y='{y(v) + 4:.1f}' text-anchor='end' class='t'>{v}</text>"
+        for v in range(0, ymax + 1, max(100, ymax // 5 // 100 * 100))
+    )
+    bars = ""
+    for i, (d, total) in enumerate(zip(dates, totals)):
+        x0 = ml + slot * i + (slot - bw) / 2
+        base = 0
+        for k, home in enumerate(homes):
+            n = per.get((home, d), 0)
+            if n:
+                # 段與段之間留 2px 底色空隙；量少的日子段很薄，空隙跟著縮，免得整段被吃掉
+                top, bottom = y(base + n), y(base)
+                bars += (f"<rect x='{x0:.1f}' y='{top:.1f}' width='{bw:.1f}' height='{max(1, bottom - top - min(2, (bottom - top) / 3)):.1f}'"
+                         f" fill='{_SERIES_COLORS[k % len(_SERIES_COLORS)]}'/>")
+                base += n
+        label = f"{d:%m/%d}" + ("（今天）" if d == today else "")
+        tip = f"{label} 合計 {total} 張\n" + "\n".join(
+            f"{_short_home_label(hm)}：{per.get((hm, d), 0)}" for hm in homes)
+        bars += (f"<text x='{x0 + bw / 2:.1f}' y='{y(total) - 6:.1f}' text-anchor='middle' class='v'>{total}</text>"
+                 f"<text x='{x0 + bw / 2:.1f}' y='{h - 6}' text-anchor='middle' class='t'>{label}</text>"
+                 f"<rect x='{ml + slot * i:.1f}' y='{mt}' width='{slot:.1f}' height='{h - mt - mb}' class='hit'>"
+                 f"<title>{html.escape(tip)}</title></rect>")
+    legend = "".join(
+        f"<span><i style='background:{_SERIES_COLORS[k % len(_SERIES_COLORS)]}'></i>{html.escape(_short_home_label(hm))}</span>"
+        for k, hm in enumerate(homes)
+    )
+    return (f"<div class='watch-chart'><div class='watch-legend'>{legend}"
+            f"<span class='muted'>柱頂數字＝當天合計，滑鼠移上去看各帳號</span></div><div class='watch-plot'>"
+            f"<svg viewBox='0 0 {w} {h}' role='img' aria-label='各帳號每天產圖張數，近 7 天'>{grid}{bars}</svg>"
+            f"</div></div>")
 
 
 def _usage_watch_section(settings: Any, homes: list[str],
@@ -643,6 +682,7 @@ def _usage_watch_section(settings: Any, homes: list[str],
     if not homes:
         return ""
     events, per_home = _wall_log(settings, homes)
+    wall_rows, wall_table = _wall_log_html(events, per_home, homes)
     times, series = _rolling_24h(settings, homes)
 
     # ---- 折線圖（伺服器端畫 SVG，hover 用一小段 JS） ----
@@ -696,11 +736,11 @@ def _usage_watch_section(settings: Any, homes: list[str],
           <h2>用量警戒</h2>
           <span class="muted" style="font-size: 13px">70% 以上注意，90% 以上危險</span>
         </div>
-        {_wall_log_html(events, per_home, homes)}
+        {wall_rows}
         <h3 class="watch-sub">Codex 額度（5 小時／週）</h3>
         <div class="watch-rows">{_quota_watch_rows(homes, usage_by_home or {})}</div>
         <h3 class="watch-sub">每天產圖張數（近 7 天，台灣時間）</h3>
-        {_daily_table(settings, homes)}
+        {_daily_chart(settings, homes)}
         <h3 class="watch-sub">往回 24 小時產圖張數（近 7 天，每小時一點）</h3>
         <div class="watch-chart">
           <div class="watch-legend">{legend}<span class="muted">空心圓＝撞牆</span></div>
@@ -712,6 +752,7 @@ def _usage_watch_section(settings: Any, homes: list[str],
             <div class="watch-tip" hidden></div>
           </div>
         </div>
+        {wall_table}
         <script type="application/json" id="watch-data">{data_json}</script>
         <script>{_WATCH_JS}</script>
       </section>
@@ -1664,9 +1705,9 @@ _STYLES = """
   .watch-plot .g { stroke: #ece6e8; stroke-width: 1; }
   .watch-plot .t { fill: var(--muted); font-size: 11px; }
   .watch-plot .wall-dot { fill: #fff; stroke-width: 2.5; }
-  .daily td, .daily th { text-align: right; font-variant-numeric: tabular-nums; }
-  .daily td:first-child, .daily th:first-child { text-align: left; }
-  .daily tr.total td { border-top: 2px solid var(--card-edge); }
+  .watch-plot .v { fill: var(--ink); font-size: 12px; font-weight: 600; }
+  .watch-plot .hit { fill: transparent; }
+  .watch-plot .hit:hover { fill: rgba(0, 0, 0, 0.04); }
   .watch-plot .cross { stroke: var(--ink-soft); stroke-width: 1; }
   .watch-tip {
     position: absolute; top: 8px; pointer-events: none;
