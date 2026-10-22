@@ -786,6 +786,11 @@ class CodexImageGenerator:
                 if rollout_bytes:
                     output_path.write_bytes(rollout_bytes)
                 if not output_path.exists():
+                    # Codex 撞到 image_gen 429 照樣 exit 0，重試那段收不到，要在這裡記冷卻
+                    try:
+                        note_image_gen_cooldown(self.settings, codex_home_used, stderr)
+                    except Exception as note_exc:  # 記冷卻壞掉不該影響錯誤回報
+                        logger.warning("could not record image_gen cooldown: %s", note_exc)
                     raise CodexGenerationError(
                         _image_gen_limit_message(stderr)
                         or f"Codex returned no image in the session rollout for {output_path}",
