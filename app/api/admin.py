@@ -561,6 +561,88 @@ def _quota_watch_rows(homes: list[str], usage_by_home: dict[str, dict[str, Any]]
     return "".join(rows)
 
 
+def _wall_log(settings: Any, homes: list[str],
+              now: datetime | None = None) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]]]:
+    """撞牆紀錄：從 stderr 裡的 image_gen 429 推回每一次撞牆，與各帳號 24h 張數。
+
+    2026-10-22 對過 .11 全部 429：resets_at 都等於「窗內最舊那張成功圖 + 24h」（差幾秒），
+    所以窗是滾動 24 小時；但撞牆當下的張數從 77 到 160 都有，之後又做到 296 沒擋，
+    額度不是固定張數。這裡只記錄實際撞到時的數字，不猜上限。
+
+    回傳 (events, per_home)。events 新到舊，每筆
+    {home, first, last, resets_at, hits, images_24h}；帳號不明（舊版失敗不記帳號）時 images_24h=None。
+    per_home[home] = {now_24h, max_24h_ok}：近 24h 張數，與最後一次撞牆解除後做到過、沒被擋的最高 24h 張數。
+    """
+    now = now or datetime.now(timezone.utc)
+    day = timedelta(hours=24)
+    ok: dict[str, list[tuple[datetime, int]]] = {}
+    for r in db.successful_image_times(settings):
+        ok.setdefault(r["codex_home"], []).append((datetime.fromisoformat(r["at"]), int(r["count"] or 1)))
+
+    def images(home: str, start: datetime, end: datetime) -> int:
+        return sum(n for t, n in ok.get(home, []) if start <= t < end)
+
+    events: list[dict[str, Any]] = []
+    for r in db.image_gen_limit_rows(settings):
+        reset = codex_image.image_gen_resets_at(r["stderr"])
+        if reset is None:
+            continue
+        at = datetime.fromisoformat(r["created_at"])
+        # 同一次撞牆的每筆請求拿到的 resets_at 只差一兩秒；舊版失敗不記帳號，幾個帳號的 429 會交錯，所以不能只比上一筆
+        last = next((e for e in events if e["home"] == r["codex_home"] and abs(e["resets_at"] - reset) <= 300), None)
+        if last:
+            last["last"], last["hits"] = at, last["hits"] + 1
+        else:
+            events.append({"home": r["codex_home"], "first": at, "last": at, "resets_at": reset, "hits": 1})
+    for e in events:
+        e["images_24h"] = images(e["home"], e["first"] - day, e["first"]) if e["home"] else None
+
+    per_home = {}
+    for home in homes:
+        walls = [e["resets_at"] for e in events if e["home"] == home]
+        since = datetime.fromtimestamp(max(walls), timezone.utc) if walls else datetime.min.replace(tzinfo=timezone.utc)
+        times = [(t, n) for t, n in ok.get(home, []) if t >= since]
+        best, total, lo = 0, 0, 0
+        for t, n in times:  # 滑動 24h 視窗，雙指標
+            total += n
+            while times[lo][0] <= t - day:
+                total -= times[lo][1]
+                lo += 1
+            best = max(best, total)
+        per_home[home] = {"now_24h": images(home, now - day, now + timedelta(seconds=1)), "max_24h_ok": best}
+    return events[::-1], per_home
+
+
+def _wall_log_html(settings: Any, homes: list[str]) -> str:
+    events, per_home = _wall_log(settings, homes)
+    fmt = lambda t: t.astimezone(_TPE).strftime("%m/%d %H:%M")
+    rows = []
+    for idx, home in enumerate(homes):
+        color = _SERIES_COLORS[idx % len(_SERIES_COLORS)]
+        p = per_home[home]
+        rows.append(
+            f"<div class='watch-row'>"
+            f"<span class='watch-name'><i style='background:{color}'></i>{html.escape(_short_home_label(home))}</span>"
+            f"<span class='watch-num'>近 24h <strong>{p['now_24h']}</strong> 張</span>"
+            f"<span class='watch-eta'>沒被擋過的最高 24h：{p['max_24h_ok']} 張</span>"
+            f"</div>"
+        )
+    trs = "".join(
+        f"<tr><td>{html.escape(_short_home_label(e['home'])) if e['home'] else '<span class=muted>帳號不明</span>'}</td>"
+        f"<td>{fmt(e['first'])}</td><td>{fmt(e['last'])}</td>"
+        f"<td>{fmt(datetime.fromtimestamp(e['resets_at'], timezone.utc))}</td>"
+        f"<td>{e['hits']}</td><td><strong>{'—' if e['images_24h'] is None else e['images_24h']}</strong></td></tr>"
+        for e in events
+    ) or "<tr><td colspan='6' class='empty'>還沒撞過牆</td></tr>"
+    return f"""
+        <h3 class="watch-sub">生圖額度（滾動 24 小時，上限張數不固定）</h3>
+        <div class="watch-rows">{''.join(rows)}</div>
+        <div class='table-wrap'><table><thead><tr>
+          <th>帳號</th><th>第一次被擋</th><th>最後一次被擋</th><th>解除</th><th>被擋筆數</th><th>撞牆時往回 24h 張數</th>
+        </tr></thead><tbody>{trs}</tbody></table></div>
+    """
+
+
 def _usage_watch_section(settings: Any, homes: list[str],
                          usage_by_home: dict[str, dict[str, Any]] | None = None) -> str:
     """用量警戒：每個帳號近 48h 張數對撞牆線，加近 7 天的 48h 累計折線。
@@ -635,6 +717,7 @@ def _usage_watch_section(settings: Any, homes: list[str],
           <h2>用量警戒</h2>
           <span class="muted" style="font-size: 13px">70% 以上注意，90% 以上危險</span>
         </div>
+        {_wall_log_html(settings, homes)}
         <h3 class="watch-sub">產圖張數（往回 48 小時）</h3>
         <div class="watch-rows">{''.join(rows)}</div>
         <h3 class="watch-sub">Codex 額度（5 小時／週）</h3>

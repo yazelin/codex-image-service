@@ -232,6 +232,13 @@ _RESETS_AT_RE = re.compile(r'resets_at\\*"\s*:\s*(\d+)')
 _TAIPEI = timezone(timedelta(hours=8))
 
 
+def image_gen_resets_at(stderr: str) -> int | None:
+    """stderr 裡 image_gen 429 usage_limit_reached 的 resets_at（epoch 秒），沒撞到回 None。"""
+    match = _IMAGE_GEN_429_RE.search(stderr or "")
+    reset = _RESETS_AT_RE.search(match.group(0)) if match else None
+    return int(reset.group(1)) if reset else None
+
+
 def _image_gen_limit_message(stderr: str) -> str | None:
     """image_gen 被 429 usage_limit_reached 擋下時,回傳人看得懂的錯誤訊息。
 

@@ -327,9 +327,8 @@ CODEX_MIN_QUOTA_PERCENT=5
 # failing with "not supported when using Codex with a ChatGPT account").
 CODEX_MODEL=gpt-5.6-luna
 # Per-account "images in the last 48h" line drawn on the Overview usage-watch
-# chart. Not an official number: on 2026-10-01 all five accounts hit ChatGPT's
-# image limit at 320–371 images over 48h; 320 is the lowest. Recalibrate after
-# the next hit.
+# chart. Not an official number, and the 2026-10-22 recheck showed 48h is the
+# wrong window (see the wall log below); kept only as a visual reference line.
 IMAGE_WALL_48H=320
 ```
 
@@ -355,16 +354,30 @@ When more than one account is configured, the Overview also carries a
   used when it fails (the retry steps to the next one). Use this to keep a
   backup account's quota untouched, or when one account is on a better plan.
 
-The admin Overview opens with a **usage watch**: one bar per account showing
+The admin Overview opens with a **usage watch**. First comes the **wall log**:
+every time ChatGPT blocked image_gen with `429 usage_limit_reached`, one row
+with the account, when it was first and last blocked, when it reset, and how
+many images that account had made in the 24h before the first block. Above
+the table, each account shows its images in the last 24h and the highest 24h
+total it has reached since its last block without being blocked. It is
+rebuilt from the `stderr` already stored per request, so past blocks show up
+too (blocks from before 2026-10-02 have no account recorded and show as
+unknown). Why 24h: on every recorded block, `resets_at` equals the oldest
+successful image in the preceding 24h plus 24h, to within seconds. Why no
+fixed wall: accounts were blocked at 77–160 images per 24h on 2026-09-30 to
+10-03, then made 296 per 24h without a block from 10-04 on, so the cap is not
+a fixed image count. The log records the real number each time instead.
+
+Then one bar per account showing
 images generated in the last 48h against `IMAGE_WALL_48H` (green below 70%,
 amber 70–90%, red above 90%, each with a text label, plus an estimate of
 how many hours until the wall at the last-24h average pace — stepped hour by
 hour, so images sliding out of the 48h window are subtracted), and a 7-day line chart
 of each account's rolling 48h total with the wall drawn in. Under the image bars, each account's Codex quota
 (5h and weekly, from the same usage API as the account cards) is shown as
-used-% bars with the same 70/90% levels and the reset countdown. 48h is the window
-that matched the 2026-10-01 limit hit; the 5h and 24h totals had been higher
-before without getting blocked.
+used-% bars with the same 70/90% levels and the reset countdown. The 48h
+window came from the 2026-10-01 hit alone and turned out not to match the
+reset times; treat these bars as a pace indicator, not a limit.
 
 The admin Overview shows one card per account with a 30-day request
 count, success/failure split, a **24h success rate** (the 30-day total
