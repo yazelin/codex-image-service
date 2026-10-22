@@ -428,6 +428,38 @@ def hourly_images(settings: Settings, hours: int) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def image_gen_limit_rows(settings: Settings) -> list[dict[str, Any]]:
+    """所有 stderr 帶 image_gen 429 usage_limit_reached 的請求，舊到新。"""
+    with connect(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT created_at, COALESCE(codex_home, '') AS codex_home, stderr
+            FROM image_requests
+            WHERE stderr LIKE '%usage_limit_reached%'
+            ORDER BY created_at
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def successful_image_times(settings: Settings) -> list[dict[str, Any]]:
+    """每筆成功請求的完成時間與張數，舊到新。
+
+    過了保留期的成功請求 status 會變 expired，所以用「沒有 error」判斷成功，不看 status。
+    """
+    with connect(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT COALESCE(codex_home, '') AS codex_home,
+                   COALESCE(finished_at, created_at) AS at, count
+            FROM image_requests
+            WHERE status IN ('succeeded', 'expired') AND COALESCE(error, '') = ''
+            ORDER BY at
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def dashboard_stats(settings: Settings) -> dict[str, int]:
     with connect(settings) as connection:
         api_key_count = connection.execute("SELECT COUNT(*) FROM api_keys").fetchone()[0]
