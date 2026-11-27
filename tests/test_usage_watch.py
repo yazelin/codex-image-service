@@ -69,7 +69,7 @@ def test_wall_dot_on_chart():
         assert page.count("class='wall-dot'") == 1 and "往回 24h 4 張" in page
 
 
-def test_quota_rows_show_used_percent_and_unknown():
+def test_quota_rows_show_remaining_percent_and_unknown():
     from app.api.admin import _quota_watch_rows
     usage = {"/h/a": {"windows": [
         {"label": "5h", "remaining_percent": 98, "reset_at": None},
@@ -78,6 +78,9 @@ def test_quota_rows_show_used_percent_and_unknown():
     page = _quota_watch_rows(["/h/a", "/h/b"], usage)
     assert "剩餘 <strong>98%</strong>" in page
     assert "剩餘 <strong>8%</strong>" in page and "lvl-crit" in page   # 週用了 92%（剩 8%）→ 危險
+    # 長條跟文字同方向：畫剩餘。剩 98% 是長條、剩 8% 是短短的紅條（2026-11-27 只改文字漏了條）
+    assert "watch-fill lvl-ok' style='width:98%'" in page
+    assert "watch-fill lvl-crit' style='width:8%'" in page
     assert "查不到額度" in page                                          # /h/b 查不到，不畫成 0%
 
 
