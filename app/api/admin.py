@@ -500,8 +500,9 @@ def _rolling_24h(settings: Any, homes: list[str], now: datetime | None = None,
 def _quota_watch_rows(homes: list[str], usage_by_home: dict[str, dict[str, Any]]) -> str:
     """Codex 訂閱額度（5h／週）還剩多少，每個帳號一列、每個 window 一條。
 
-    文字寫「剩餘」，跟帳號卡與 `cx usage` 的 left 同一個方向（2026-11-27 作者對照時
-    被「已用」與「left」混用搞混）；進度條仍畫已用的比例，顏色照已用程度。
+    文字與進度條都畫「剩餘」，跟帳號卡與 `cx usage` 的 left 同一個方向（2026-11-27 作者
+    對照時被「已用」與「left」混用搞混；第一次只改了文字、條還畫已用，作者再指出）。
+    顏色照已用程度：剩得少的會是短短的紅條。
 
     跟產圖張數是兩回事：這是 ChatGPT 回報的 Codex 用量 %，來源同帳號卡的 Quota left。
     查不到就寫查不到，不畫成 0%。
@@ -522,7 +523,7 @@ def _quota_watch_rows(homes: list[str], usage_by_home: dict[str, dict[str, Any]]
             cells.append(
                 f"<span class='quota-cell'>"
                 f"<span class='quota-label'>{html.escape(w['label'])}</span>"
-                f"<span class='watch-meter'><span class='watch-fill {cls}' style='width:{used}%'></span></span>"
+                f"<span class='watch-meter'><span class='watch-fill {cls}' style='width:{100 - used}%'></span></span>"
                 f"<span class='quota-text'>剩餘 <strong>{100 - used}%</strong>{reset}</span>"
                 f"<span class='watch-lvl {cls}'>{label}</span>"
                 f"</span>"
