@@ -425,10 +425,12 @@ def _codex_accounts_section(
 
     cards = []
     seen: set[str] = set()
+    same_login = _same_login_groups(list(effective_homes))
     for home in effective_homes:
         seen.add(home)
         stats = by_path.get(home, {"total": 0, "succeeded": 0, "failed": 0, "last_seen": None})
         cards.append(_codex_account_card(home, stats, configured=True,
+                                         same_as=same_login.get(home),
                                          stats_24h=by_path_24h.get(home),
                                          usage=(usage_by_home or {}).get(home),
                                          images=images_for(home)))
@@ -496,7 +498,10 @@ def _rolling_24h(settings: Any, homes: list[str], now: datetime | None = None,
 
 
 def _quota_watch_rows(homes: list[str], usage_by_home: dict[str, dict[str, Any]]) -> str:
-    """Codex 訂閱額度（5h／週）已用多少，每個帳號一列、每個 window 一條。
+    """Codex 訂閱額度（5h／週）還剩多少，每個帳號一列、每個 window 一條。
+
+    文字寫「剩餘」，跟帳號卡與 `cx usage` 的 left 同一個方向（2026-11-27 作者對照時
+    被「已用」與「left」混用搞混）；進度條仍畫已用的比例，顏色照已用程度。
 
     跟產圖張數是兩回事：這是 ChatGPT 回報的 Codex 用量 %，來源同帳號卡的 Quota left。
     查不到就寫查不到，不畫成 0%。
@@ -518,7 +523,7 @@ def _quota_watch_rows(homes: list[str], usage_by_home: dict[str, dict[str, Any]]
                 f"<span class='quota-cell'>"
                 f"<span class='quota-label'>{html.escape(w['label'])}</span>"
                 f"<span class='watch-meter'><span class='watch-fill {cls}' style='width:{used}%'></span></span>"
-                f"<span class='quota-text'>已用 <strong>{used}%</strong>{reset}</span>"
+                f"<span class='quota-text'>剩餘 <strong>{100 - used}%</strong>{reset}</span>"
                 f"<span class='watch-lvl {cls}'>{label}</span>"
                 f"</span>"
             )
@@ -808,6 +813,53 @@ _WATCH_JS = """
 """
 
 
+def _auth_identity(home_path: str) -> dict[str, str] | None:
+    """從 auth.json 讀出「這是哪個登入」：工作區（account_id）、使用者 id、信箱網域。
+
+    同一個工作區可以有不同的人（例如 gmail 與公司信箱），用量各算各的，所以
+    只看 account_id 分不出來；要加上使用者才是一份獨立的額度。只解 id_token 的
+    payload 讀欄位，不驗簽、不送出任何東西。讀不到回 None。
+    """
+    import base64 as _b64
+    import json as _json
+    try:
+        data = _json.loads((Path(home_path) / "auth.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    tokens = data.get("tokens") or {}
+    claims: dict[str, Any] = {}
+    id_token = tokens.get("id_token") or ""
+    if id_token.count(".") >= 2:
+        try:
+            seg = id_token.split(".")[1]
+            seg += "=" * (-len(seg) % 4)
+            claims = _json.loads(_b64.urlsafe_b64decode(seg))
+        except Exception:
+            claims = {}
+    auth = claims.get("https://api.openai.com/auth") or {}
+    email = str(claims.get("email") or "")
+    return {
+        "account": str(tokens.get("account_id") or ""),
+        "user": str(auth.get("chatgpt_user_id") or claims.get("sub") or ""),
+        "domain": email.split("@", 1)[1] if "@" in email else "",
+    }
+
+
+def _same_login_groups(homes: list[str]) -> dict[str, list[str]]:
+    """home → 其他「其實是同一個登入」的 home 名稱（工作區＋使用者都相同）。"""
+    keys: dict[str, tuple[str, str]] = {}
+    for home in homes:
+        ident = _auth_identity(home)
+        if ident and ident["account"] and ident["user"]:
+            keys[home] = (ident["account"], ident["user"])
+    groups: dict[str, list[str]] = {}
+    for home, key in keys.items():
+        others = [_short_home_label(h) for h, k in keys.items() if k == key and h != home]
+        if others:
+            groups[home] = others
+    return groups
+
+
 def _decode_access_token_exp(access_token: str) -> datetime | None:
     """Pull the `exp` claim out of the access_token JWT and return it as UTC
     datetime. None on any parse error (corrupt token, padding mismatch, etc.)
@@ -881,6 +933,7 @@ def _codex_account_card(
     stats: dict[str, Any],
     *,
     configured: bool,
+    same_as: list[str] | None = None,
     stats_24h: dict[str, Any] | None = None,
     usage: dict[str, Any] | None = None,
     images: dict[str, int] | None = None,
@@ -948,7 +1001,9 @@ def _codex_account_card(
                     auth_status = "<span class='chip chip-mute'>refresh time unreadable</span>"
 
             if account_id:
-                account_hint = f"<code class='handle'>account {account_id[:8]}…</code>"
+                ident = _auth_identity(home_path) or {}
+                domain = f" · {html.escape(ident['domain'])}" if ident.get("domain") else ""
+                account_hint = f"<code class='handle'>account {account_id[:8]}…{domain}</code>"
     except Exception:
         auth_status = "<span class='chip chip-fail'>auth.json read error</span>"
 
@@ -957,6 +1012,10 @@ def _codex_account_card(
         if configured
         else "<span class='chip chip-mute'>historical</span>"
     )
+    if same_as:
+        # 兩個資料夾其實是同一個登入：輪替時會以為多一份額度，用量也會一模一樣。
+        status_chip += ("<span class='chip chip-fail'>與 "
+                        + html.escape("、".join(same_as)) + " 是同一個帳號</span>")
 
     return f"""
       <div class="account-card">

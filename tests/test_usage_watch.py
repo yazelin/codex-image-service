@@ -76,8 +76,8 @@ def test_quota_rows_show_used_percent_and_unknown():
         {"label": "Weekly", "remaining_percent": 8, "reset_at": None},
     ]}}
     page = _quota_watch_rows(["/h/a", "/h/b"], usage)
-    assert "已用 <strong>2%</strong>" in page
-    assert "已用 <strong>92%</strong>" in page and "lvl-crit" in page   # 週用了 92% → 危險
+    assert "剩餘 <strong>98%</strong>" in page
+    assert "剩餘 <strong>8%</strong>" in page and "lvl-crit" in page   # 週用了 92%（剩 8%）→ 危險
     assert "查不到額度" in page                                          # /h/b 查不到，不畫成 0%
 
 
